@@ -1,4 +1,4 @@
-# ProRAG
+# ProRAG — Proactive GraphRAG
 
 Minimal entity-graph RAG for grounded question answering.
 
