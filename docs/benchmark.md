@@ -6,7 +6,7 @@ Benchmarks compare ProRAG against:
 - **Naive RAG** — vector search + single LLM call (LangChain default)
 - **GraphRAG** — Microsoft's GraphRAG (community summaries mode)
 
-LLM: `llama3-70b-8192` via Groq for all systems (same model, same temperature=0).
+LLM: `llama-3.3-70b-versatile` via Groq for all systems (same model, same temperature=0).
 
 ## Datasets
 

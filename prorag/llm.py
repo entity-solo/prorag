@@ -11,7 +11,7 @@ from typing import Any
 
 def call_llm(
     prompt: str,
-    model: str = "llama3-70b-8192",
+    model: str = "llama-3.3-70b-versatile",
     max_tokens: int = 1024,
     system: str = "",
 ) -> str:

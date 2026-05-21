@@ -21,7 +21,7 @@ MOCK_MODE = False
 original_call_llm = prorag.llm.call_llm
 
 
-def intercepted_call_llm(prompt, model="llama3-70b-8192", max_tokens=1024, system=""):
+def intercepted_call_llm(prompt, model="llama-3.3-70b-versatile", max_tokens=1024, system=""):
     global LLM_CALL_COUNT, LLM_INPUT_CHARS, LLM_OUTPUT_CHARS
     LLM_CALL_COUNT += 1
     LLM_INPUT_CHARS += len(prompt) + len(system)
@@ -125,7 +125,7 @@ except ImportError:
     pass
 
 
-def cached_extract_triples(text, source="", llm_model="llama3-70b-8192", extra_domains=None):
+def cached_extract_triples(text, source="", llm_model="llama-3.3-70b-versatile", extra_domains=None):
     if MOCK_MODE:
         return original_extract_triples(text, source=source, llm_model=llm_model, extra_domains=extra_domains)
 
@@ -168,7 +168,7 @@ if original_extract_triples:
 class NaiveRAG:
     """Keyword-based Naive RAG baseline."""
     
-    def __init__(self, model: str = "llama3-70b-8192"):
+    def __init__(self, model: str = "llama-3.3-70b-versatile"):
         self.model = model
         self.documents = []
 
@@ -269,7 +269,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate ProRAG vs Naive RAG on HotpotQA")
     parser.add_argument("--dataset", type=str, default="data/hotpot_dev_distractor_v1.json", help="Path to HotpotQA dataset")
     parser.add_argument("--n", type=int, default=5, help="Number of questions to evaluate")
-    parser.add_argument("--model", type=str, default="llama3-70b-8192", help="LLM Model to use")
+    parser.add_argument("--model", type=str, default="llama-3.3-70b-versatile", help="LLM Model to use")
     parser.add_argument("--mock", action="store_true", help="Run in offline mock mode without API keys")
     args = parser.parse_args()
 

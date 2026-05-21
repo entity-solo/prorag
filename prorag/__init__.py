@@ -25,7 +25,7 @@ class ProRAG:
         result = rag.ask("What did Einstein develop?")
     """
 
-    def __init__(self, model: str = "llama3-70b-8192"):
+    def __init__(self, model: str = "llama-3.3-70b-versatile"):
         self.graph = ProRAGGraph()
         self.model = model
 

@@ -49,7 +49,7 @@ JSON array:"""
 def extract_triples(
     text: str,
     source: str = "",
-    llm_model: str = "llama3-70b-8192",
+    llm_model: str = "llama-3.3-70b-versatile",
     extra_domains: list[str] | None = None,
 ) -> list[dict]:
     """Return a list of raw triple dicts from a text passage."""
@@ -74,7 +74,7 @@ def ingest_text(
     text: str,
     graph: ProRAGGraph,
     source: str = "",
-    llm_model: str = "llama3-70b-8192",
+    llm_model: str = "llama-3.3-70b-versatile",
     extra_domains: list[str] | None = None,
 ) -> int:
     """
@@ -103,7 +103,7 @@ def ingest_file(
     path: str,
     graph: ProRAGGraph,
     source: str | None = None,
-    llm_model: str = "llama3-70b-8192",
+    llm_model: str = "llama-3.3-70b-versatile",
     chunk_size: int = 1500,
 ) -> int:
     """Read a plain-text file and ingest all chunks into the graph."""

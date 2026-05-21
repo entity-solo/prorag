@@ -50,7 +50,7 @@ Question: {question}
 JSON array:"""
 
 
-def detect_domains(question: str, llm_model: str = "llama3-70b-8192") -> list[str]:
+def detect_domains(question: str, llm_model: str = "llama-3.3-70b-versatile") -> list[str]:
     """
     Returns the most relevant domain(s) for a question.
 

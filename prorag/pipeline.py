@@ -36,7 +36,7 @@ _CONTRADICTIONS_NOTE = "\n⚠️  Note: conflicting information exists — see s
 def answer(
     question: str,
     graph: ProRAGGraph,
-    llm_model: str = "llama3-70b-8192",
+    llm_model: str = "llama-3.3-70b-versatile",
     max_context_triples: int = 60,
 ) -> dict:
     """
