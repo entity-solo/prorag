@@ -1,10 +1,64 @@
 import os
 import json
 import time
+import hashlib
 from datetime import datetime
 from prorag import ProRAG
 from prorag.pipeline import answer, _keywords_from_question
 from prorag.llm import call_llm
+
+# ── Extractor Cache ───────────────────────────────────────────────────────────
+CACHE_PATH = os.path.join("data", "extracted_triples_cache.json")
+TRIPLE_CACHE = {}
+
+def load_triple_cache():
+    global TRIPLE_CACHE
+    if os.path.exists(CACHE_PATH):
+        try:
+            with open(CACHE_PATH, "r", encoding="utf-8") as f:
+                TRIPLE_CACHE = json.load(f)
+        except Exception:
+            TRIPLE_CACHE = {}
+
+def save_triple_cache():
+    try:
+        with open(CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(TRIPLE_CACHE, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Failed to save triple cache: {e}")
+
+original_extract_triples = None
+try:
+    import prorag.extractor
+    original_extract_triples = prorag.extractor.extract_triples
+except ImportError:
+    pass
+
+def cached_extract_triples(text, source="", llm_model="llama-3.3-70b-versatile", extra_domains=None):
+    text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+    if text_hash in TRIPLE_CACHE:
+        triples = json.loads(json.dumps(TRIPLE_CACHE[text_hash]))
+        if extra_domains:
+            for t in triples:
+                for d in extra_domains:
+                    if d not in t.get("domains", []):
+                        t.setdefault("domains", []).append(d)
+        if source:
+            for t in triples:
+                t["source"] = source
+        return triples
+
+    triples = original_extract_triples(text, source=source, llm_model=llm_model, extra_domains=extra_domains)
+    raw_triples = original_extract_triples(text, source="", llm_model=llm_model, extra_domains=None)
+    TRIPLE_CACHE[text_hash] = raw_triples
+    save_triple_cache()
+    return triples
+
+if original_extract_triples:
+    prorag.extractor.extract_triples = cached_extract_triples
+
+load_triple_cache()
+
 
 class NaiveRAG:
     def __init__(self, model: str = "llama-3.3-70b-versatile"):
@@ -54,7 +108,7 @@ Never make up facts not present in the context.
 
 if 'GROQ_API_KEY' not in os.environ:
     print("[Warning] GROQ_API_KEY is not set in your environment variables. Please set it before running this script.")
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "qwen/qwen3-32b"
 
 # 15 Deeply Connected Documents on Space Exploration History
 CORPUS = [
@@ -189,8 +243,13 @@ QUESTIONS = [
 ]
 
 
+import re
+
 def calculate_f1(pred: str, gold: str) -> float:
-    pred_words = re.findall(r"\w+", pred.lower())
+    # Strip <think>...</think> tags and contents from prediction
+    pred_clean = re.sub(r"<think>.*?</think>", "", pred, flags=re.DOTALL).strip()
+    
+    pred_words = re.findall(r"\w+", pred_clean.lower())
     gold_words = re.findall(r"\w+", gold.lower())
     if not pred_words or not gold_words:
         return 0.0
@@ -200,9 +259,6 @@ def calculate_f1(pred: str, gold: str) -> float:
     precision = len(common) / len(pred_words)
     recall = len(common) / len(gold_words)
     return 2 * (precision * recall) / (precision + recall)
-
-
-import re
 
 def main():
     print("="*80)

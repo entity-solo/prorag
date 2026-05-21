@@ -80,17 +80,17 @@ These results were run locally using `llama-3.3-70b-versatile` on Groq.
 
 ## Topic-Based Space Exploration Benchmark (15 Documents, 12 Questions)
 
-This benchmark evaluates multi-hop reasoning capabilities on a unified knowledge graph representing the history of space exploration (Apollo missions, Soviet Vostok programs, spacecraft designers, and telescope repairs).
+This benchmark evaluates multi-hop reasoning capabilities on a unified knowledge graph representing the history of space exploration (Apollo missions, Soviet Vostok programs, spacecraft designers, and telescope repairs). The evaluation is run using the **`qwen/qwen3-32b`** reasoning model on Groq.
 
 ### Comparison Summary
 
 | Phase / Metric | Naive RAG | **ProRAG** (Improved) |
 |---|---|---|
-| Ingestion Time | 0.00s | **22.19s** (Built once) |
-| F1 Score (Avg) | 0.3845 | **0.4364** |
-| Factual / Semantic Accuracy | **70.8%** (8.5/12 correct) | **83.3%** (10/12 correct) |
-| Query Latency (Avg) | 1.51s | **1.75s** |
-| Triples used (Avg) | N/A | **30** |
+| Ingestion Time | 0.00s | **0.00s** (Fully Cached) |
+| F1 Score (Avg) | 0.3539 | **0.5246** (48% improvement) |
+| Factual / Semantic Accuracy | **70.8%** (8.5/12 correct) | **100.0%** (12/12 correct) |
+| Query Latency (Avg) | 4.84s | **8.84s** (Reasoning model) |
+| Triples used (Avg) | N/A | **38** |
 
 ### Key Takeaways
 1. **Multi-Hop Traversal**: Naive RAG failed completely on 3 out of 12 questions requiring 3+ reasoning steps (e.g. looking up Frank Borman's birth city from a query about the commander of Apollo 8, or identifying Dwight D. Eisenhower as the president who founded NASA, which managed the Apollo 11 moon landing). ProRAG correctly resolved these links by traversing the graph.
