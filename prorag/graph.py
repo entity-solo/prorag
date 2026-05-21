@@ -156,18 +156,31 @@ class ProRAGGraph:
         if not candidate_nodes:
             return []
 
-        # Expand by hop count
-        expanded = set(candidate_nodes)
+        # BFS to expand and compute distance from candidate_nodes
+        distances = {node: 0 for node in candidate_nodes}
         frontier = set(candidate_nodes)
-        for _ in range(max_hops):
+        for hop in range(1, max_hops + 1):
             next_frontier = set()
             for node in frontier:
-                next_frontier |= set(self.g.successors(node))
-                next_frontier |= set(self.g.predecessors(node))
-            if domains:
-                next_frontier &= allowed
-            expanded |= next_frontier
+                neighbors = set(self.g.successors(node)) | set(self.g.predecessors(node))
+                if domains:
+                    neighbors &= allowed
+                for n in neighbors:
+                    if n not in distances:
+                        distances[n] = hop
+                        next_frontier.add(n)
             frontier = next_frontier
+
+        expanded = set(distances.keys())
+
+        # Helper to compute keyword relevance score
+        def get_relevance(triple):
+            score = 0
+            text = f"{triple['subject']} {triple['relation']} {triple['object']}".lower()
+            for kw in keywords:
+                if kw.lower() in text:
+                    score += 1
+            return score
 
         # Collect triples
         triples = []
@@ -176,6 +189,7 @@ class ProRAGGraph:
                 if tgt not in expanded:
                     continue
                 m: EdgeMeta = data["meta"]
+                dist = min(distances.get(src, max_hops), distances.get(tgt, max_hops))
                 triples.append({
                     "subject": src,
                     "relation": data["relation"],
@@ -184,10 +198,11 @@ class ProRAGGraph:
                     "condition": m.condition,
                     "confidence": m.confidence,
                     "sources": m.sources,
+                    "distance": dist,
                 })
 
-        # Sort by confidence, cap at top_k
-        triples.sort(key=lambda x: x["confidence"], reverse=True)
+        # Sort by: 1. Relevance (desc), 2. Seed Distance (asc), 3. Confidence (desc)
+        triples.sort(key=lambda x: (-get_relevance(x), x["distance"], -x["confidence"]))
         return triples[:top_k]
 
     def get_domains(self) -> list[str]:

@@ -37,7 +37,7 @@ def answer(
     question: str,
     graph: ProRAGGraph,
     llm_model: str = "llama3-70b-8192",
-    max_context_triples: int = 30,
+    max_context_triples: int = 60,
 ) -> dict:
     """
     Answer a question from the knowledge graph.
@@ -61,7 +61,7 @@ def answer(
     triples = graph.query(keywords, domains=domains, top_k=max_context_triples)
 
     # Also try without domain filter if result is sparse
-    if len(triples) < 5:
+    if len(triples) < 15:
         triples = graph.query(keywords, domains=None, top_k=max_context_triples)
 
     # 4 — format context
@@ -96,8 +96,10 @@ def answer(
 def _keywords_from_question(question: str) -> list[str]:
     """Extract candidate keywords — stopword-filtered tokens."""
     stopwords = {
-        "what", "who", "when", "where", "why", "how", "is", "are", "was",
+        "what", "who", "when", "where", "why", "how", "is", "are", "was", "were",
         "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or",
+        "did", "does", "do", "which", "also", "originally", "should", "could", "would",
+        "that", "this", "these", "those", "by", "with", "from", "about", "into",
         "cái", "gì", "là", "của", "và", "ở", "tại", "khi", "nào", "có",
     }
     tokens = re.findall(r"\b\w{3,}\b", question.lower())
