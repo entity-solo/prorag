@@ -5,6 +5,7 @@ Determines which domain subgraph(s) to query for a given question.
 Uses keyword heuristics first (free, instant), then LLM if ambiguous.
 """
 
+import re
 from .llm import call_llm
 
 # Keyword → domain mapping (expand as needed)
@@ -79,7 +80,7 @@ def detect_domains(question: str, llm_model: str = "llama-3.3-70b-versatile") ->
     return ["general"]
 
 
-import re
+
 
 def _keyword_scan(text: str) -> list[str]:
     """Return domains whose keywords appear in the text as whole words."""
