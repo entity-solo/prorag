@@ -53,6 +53,13 @@ This means the LLM always sees the full picture — no silent overwriting.
 **Domain index:**
 An in-memory `dict[domain → set[node_id]]` allows O(1) subgraph filtering at query time.
 
+**Relevance & Seed Distance Query Ranking:**
+When query keywords are traversed, candidate seed nodes are retrieved and expanded using BFS up to `max_hops`. Triples in the expanded subgraph are ranked using a composite key:
+1. **Relevance**: Count of query keywords present in the triple's subject, relation, or object text (higher matches first).
+2. **Seed Distance**: The minimum BFS distance (hop count) of the triple's nodes from the initial seed nodes (closer to seeds first).
+3. **Confidence**: The triple's credibility score (higher confidence first).
+This prevents critical multi-hop information from being discarded arbitrarily by flat confidence sorting.
+
 ### `extractor.py`
 
 Converts raw text to triples via a single LLM prompt. The prompt instructs the model to:
@@ -74,9 +81,9 @@ Two-stage domain detection:
 
 The query path:
 1. `detect_domains(question)` — keyword scan or LLM
-2. `_keywords_from_question(question)` — stopword-filtered tokens
-3. `graph.query(keywords, domains=...)` — BFS from seed nodes within domain subgraph
-4. If sparse result, retry without domain filter
+2. `_keywords_from_question(question)` — extracts query tokens and filters them using an extended list of grammatical structural stopwords (e.g. `originally`, `which`, `also`, `did`) to prevent noisy seed node matches.
+3. `graph.query(keywords, domains=...)` — BFS expansion from seed nodes, retrieving up to `max_context_triples = 60` (default).
+4. If results are sparse (less than 15 triples), fallback to query the entire graph without domain filtering (`domains=None`).
 5. `_format_context(triples)` — render as bullet list with conditions, confidence, and contradiction flags
 6. Single LLM call with `_ANSWER_PROMPT`
 7. Append contradiction warning if any `CONTRADICTS` edges appeared in context
