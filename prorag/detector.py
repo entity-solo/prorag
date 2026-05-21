@@ -79,11 +79,16 @@ def detect_domains(question: str, llm_model: str = "llama3-70b-8192") -> list[st
     return ["general"]
 
 
+import re
+
 def _keyword_scan(text: str) -> list[str]:
-    """Return domains whose keywords appear in the text."""
+    """Return domains whose keywords appear in the text as whole words."""
     text_lower = text.lower()
     matched = []
     for domain, keywords in _DOMAIN_KEYWORDS.items():
-        if any(kw in text_lower for kw in keywords):
-            matched.append(domain)
+        for kw in keywords:
+            pattern = r"\b" + re.escape(kw) + r"\b"
+            if re.search(pattern, text_lower):
+                matched.append(domain)
+                break
     return matched
