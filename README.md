@@ -59,8 +59,8 @@ Query → detect domain → search subgraph → inject context → LLM (once) �
 ```
 
 **Linguistic support out of the box:**
-- Negation: *"không / chưa / not"* → `negated=True` edge flag
-- Passive voice: *"bị / được / was"* → automatically flips subject/object
+- Negation: *"not / never"* → `negated=True` edge flag
+- Passive voice: *"was / by"* → automatically flips subject/object
 - Conditions: *"at 1 atm"*, *"in 1905"* → stored as edge metadata
 - Contradictions: explicitly stored as `CONTRADICTS:relation` edges with separate source tracking
 
