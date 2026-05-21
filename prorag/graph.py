@@ -11,6 +11,8 @@ import numpy as np
 import networkx as nx
 from dataclasses import dataclass, field, asdict
 
+from .entity_utils import is_unresolved_reference, normalize_entity_name
+
 
 @dataclass
 class NodeMeta:
@@ -59,7 +61,7 @@ class ProRAGGraph:
         confidence: float = 1.0,
     ) -> None:
         """Add (subject, relation, object) to the graph."""
-        # Normalize strings to strip whitespaces and use lowercase
+        # Normalize strings and reject unresolved references before graph writes.
         if subject is None or relation is None or obj is None:
             return
         if isinstance(subject, list):
@@ -77,10 +79,12 @@ class ProRAGGraph:
         elif not isinstance(obj, str):
             obj = str(obj)
 
-        subject = subject.strip().lower()
+        subject = normalize_entity_name(subject)
         relation = relation.strip().lower()
-        obj = obj.strip().lower()
+        obj = normalize_entity_name(obj)
         if not subject or not relation or not obj:
+            return
+        if is_unresolved_reference(subject) or is_unresolved_reference(obj):
             return
         domains = [d.strip().lower() for d in (domains or ["general"]) if d]
         
@@ -293,17 +297,18 @@ class ProRAGGraph:
         top_k: int = 60,
         seed_k: int = 10,
         seed_threshold: float = 0.25,
+        alias_threshold: float = 0.85,
     ) -> list[dict]:
         """
         2-phase vector retrieval:
           Phase 1 — Entity matching: embed question, find top-K similar nodes
                     via cosine similarity → seed nodes.
-          Phase 2 — Relation-guided BFS with semantic cost:
+          Phase 2 — Relation-guided BFS with semantic cost and on-the-fly alias resolution:
                     step_cost = 1 - sim(edge_relation_or_neighbor, question)
                     Total path cost accumulates. BFS stops when cost >= max_cost.
                     → Relevant edges (cost≈0) allow deep traversal.
                     → Irrelevant edges (cost≈1) are naturally pruned after 1 hop.
-                    No hard hop limit needed — the semantic cost is the cutoff.
+                    → Similar entities (cosine similarity >= alias_threshold) are linked.
         """
         from .embeddings import EmbeddingStore
         store = EmbeddingStore()
@@ -320,6 +325,13 @@ class ProRAGGraph:
         if not seeds:
             # fallback: use all nodes as seeds (small graph)
             seeds = set(all_nodes[:seed_k])
+
+        # ── Pre-normalize all node embeddings for alias matching ──────────────
+        node_embs = None
+        if alias_threshold > 0.0 and len(all_nodes) > 1:
+            embs = np.array([store.embed(n) for n in all_nodes])
+            norms = np.linalg.norm(embs, axis=1, keepdims=True)
+            node_embs = embs / np.maximum(norms, 1e-9)
 
         # ── Phase 2: relation-guided BFS ──────────────────────────────────────
         distances: dict[str, float] = {node: 0.0 for node in seeds}
@@ -357,6 +369,24 @@ class ProRAGGraph:
                 ):
                     distances[neighbor] = new_dist
                     heapq.heappush(queue, (new_dist, neighbor))
+
+            # Traverse virtual alias edges
+            if alias_threshold > 0.0 and node_embs is not None:
+                node_emb = store.embed(node)
+                node_emb_norm = node_emb / max(np.linalg.norm(node_emb), 1e-9)
+                sims = np.dot(node_embs, node_emb_norm)
+                for idx, sim in enumerate(sims):
+                    alias_node = all_nodes[idx]
+                    if alias_node == node:
+                        continue
+                    if sim >= alias_threshold:
+                        step_cost = 1.0 - max(0.0, float(sim))
+                        new_dist = dist + step_cost
+                        if new_dist < max_cost and (
+                            alias_node not in distances or new_dist < distances[alias_node]
+                        ):
+                            distances[alias_node] = new_dist
+                            heapq.heappush(queue, (new_dist, alias_node))
 
         expanded = set(distances.keys())
 

@@ -4,6 +4,8 @@ Unit tests — no LLM required, tests the graph engine directly.
 
 import pytest
 from prorag.graph import ProRAGGraph
+from prorag.extractor import extract_triples, ingest_text, _chunk_text
+from prorag.pipeline import detect_question_slot, retrieve_evidence
 
 
 @pytest.fixture
@@ -187,3 +189,186 @@ def test_nested_fact_query_resolution():
     assert "là ceo của" in relations
     assert "cho ra mắt" in relations
 
+
+def test_alias_bridging():
+    graph = ProRAGGraph()
+    # Adding two disconnected components representing the same person with slightly different name
+    graph.add_triple("Kiss and Tell", "stars", "Shirley Temple")
+    graph.add_triple("Shirley Temple Black", "served as", "Chief of Protocol")
+
+    # query_vector for Shirley Temple Black's movie should retrieve Chief of Protocol
+    # since Shirley Temple and Shirley Temple Black have high similarity (>0.85)
+    results = graph.query_vector("Kiss and Tell", alias_threshold=0.85)
+    
+    # We should have traversed the alias bridge and retrieved the Chief of Protocol fact
+    objects = {r["object"] for r in results}
+    assert "chief of protocol" in objects
+
+
+def test_graph_rejects_unresolved_pronouns():
+    graph = ProRAGGraph()
+    graph.add_triple("it", "announced", "iphone 15")
+    graph.add_triple("apple", "announced", "it")
+    assert graph.stats()["nodes"] == 0
+    assert graph.stats()["edges"] == 0
+
+
+def test_chunk_text_has_sentence_overlap():
+    text = "Alpha launched Beta. It shipped in September. Customers liked it. Sales increased."
+    chunks = _chunk_text(text, size=45, overlap_sentences=1)
+    assert len(chunks) >= 2
+    assert "It shipped in September." in chunks[0]
+    assert "It shipped in September." in chunks[1]
+
+
+def test_extract_triples_resolves_pronoun_from_recent_entity():
+    from unittest.mock import patch
+
+    mock_response = """
+    [
+      {"subject_mention": "Apple", "subject": "apple", "relation": "released", "object_mention": "iPhone 15", "object": "iphone 15", "negated": false, "confidence": 1.0},
+      {"subject_mention": "It", "subject": "", "relation": "was announced in", "object_mention": "September", "object": "september", "negated": false, "confidence": 1.0}
+    ]
+    """
+    with patch("prorag.extractor.call_llm", return_value=mock_response):
+        triples = extract_triples("Apple released iPhone 15. It was announced in September.")
+    assert len(triples) == 2
+    assert triples[1]["subject"] == "iphone 15"
+    assert triples[1]["subject_mention"].lower() == "it"
+
+
+def test_extract_triples_uses_llm_fallback_for_generic_reference():
+    from unittest.mock import patch
+
+    extract_response = """
+    [
+      {"subject_mention": "OpenAI", "subject": "openai", "relation": "partnered with", "object_mention": "Apple", "object": "apple", "negated": false, "confidence": 1.0},
+      {"subject_mention": "The company", "subject": "", "relation": "launched", "object_mention": "a new model", "object": "a new model", "negated": false, "confidence": 0.9}
+    ]
+    """
+    coref_response = '{"resolved":"apple","confidence":0.96}'
+    with patch("prorag.extractor.call_llm", side_effect=[extract_response, coref_response]):
+        triples = extract_triples("OpenAI partnered with Apple. The company launched a new model.")
+    assert len(triples) == 2
+    assert triples[1]["subject"] == "apple"
+
+
+def test_extract_triples_drops_unresolved_pronoun_fact():
+    from unittest.mock import patch
+
+    mock_response = """
+    [
+      {"subject_mention": "It", "subject": "", "relation": "was announced in", "object_mention": "September", "object": "september", "negated": false, "confidence": 1.0}
+    ]
+    """
+    with patch("prorag.extractor.call_llm", return_value=mock_response):
+        triples = extract_triples("It was announced in September.")
+    assert triples == []
+
+
+def test_ingest_text_full_pipeline_avoids_pronoun_nodes():
+    from unittest.mock import patch
+
+    mock_response = """
+    [
+      {"subject_mention": "Apple", "subject": "apple", "relation": "released", "object_mention": "iPhone 15", "object": "iphone 15", "negated": false, "confidence": 1.0},
+      {"subject_mention": "It", "subject": "", "relation": "was announced in", "object_mention": "September", "object": "september", "negated": false, "confidence": 1.0}
+    ]
+    """
+    graph = ProRAGGraph()
+    with patch("prorag.extractor.call_llm", return_value=mock_response):
+        added = ingest_text("Apple released iPhone 15. It was announced in September.", graph)
+
+    assert added == 2
+    assert "it" not in graph.g.nodes
+    assert "iphone 15" in graph.g.nodes
+
+
+def test_detect_question_slot_5w():
+    assert detect_question_slot("Where was Inception filmed?") == "where"
+    assert detect_question_slot("When did Apple launch iPhone 15?") == "when"
+    assert detect_question_slot("Who directed Inception?") == "who"
+    assert detect_question_slot("Why was the product delayed?") == "why"
+    assert detect_question_slot("How many users signed up?") == "how_many"
+
+
+def test_retrieve_evidence_prefers_where_relation():
+    graph = ProRAGGraph()
+    graph.add_triple("christopher nolan", "directed", "inception")
+    graph.add_triple("inception", "filmed in", "paris")
+    graph.add_triple("inception", "released by", "warner bros")
+
+    triples, meta = retrieve_evidence("Where was the film directed by Christopher Nolan filmed?", graph, top_k=3)
+
+    assert meta["slot"] == "where"
+    assert "christopher nolan" in meta["seed_entities"]
+    first_two_relations = [triples[0]["relation"], triples[1]["relation"]]
+    assert first_two_relations == ["directed", "filmed in"]
+    assert triples[1]["object"] == "paris"
+
+
+def test_retrieve_evidence_prefers_who_relation():
+    graph = ProRAGGraph()
+    graph.add_triple("christopher nolan", "directed", "inception")
+    graph.add_triple("inception", "filmed in", "paris")
+    graph.add_triple("inception", "released in", "2010")
+
+    triples, meta = retrieve_evidence("Who directed Inception?", graph, top_k=3)
+
+    assert meta["slot"] == "who"
+    assert triples[0]["relation"] == "directed"
+    assert triples[0]["subject"] == "christopher nolan"
+
+
+def test_retrieve_evidence_prefers_connected_path_for_where_question():
+    graph = ProRAGGraph()
+    graph.add_triple("christopher nolan", "directed", "inception")
+    graph.add_triple("inception", "filmed in", "paris")
+    graph.add_triple("inception", "released in", "2010")
+    graph.add_triple("inception", "distributed by", "warner bros")
+
+    triples, meta = retrieve_evidence(
+        "Where was the film directed by Christopher Nolan filmed?",
+        graph,
+        top_k=3,
+    )
+
+    assert meta["path_count"] > 0
+    assert [triples[0]["relation"], triples[1]["relation"]] == ["directed", "filmed in"]
+    assert triples[1]["object"] == "paris"
+
+
+def test_retrieve_evidence_prefers_connected_path_for_when_question():
+    graph = ProRAGGraph()
+    graph.add_triple("christopher nolan", "directed", "inception")
+    graph.add_triple("inception", "released in", "2010")
+    graph.add_triple("inception", "filmed in", "paris")
+
+    triples, _meta = retrieve_evidence(
+        "When was the film directed by Christopher Nolan released?",
+        graph,
+        top_k=3,
+    )
+
+    assert [triples[0]["relation"], triples[1]["relation"]] == ["directed", "released in"]
+    assert triples[1]["object"] == "2010"
+
+
+def test_retrieve_evidence_falls_back_to_keyword_query():
+    graph = ProRAGGraph()
+    graph.add_triple("apple", "launched", "iphone 15")
+
+    original = graph.query_vector
+
+    def _raise_import_error(*args, **kwargs):
+        raise ImportError("sentence-transformers missing")
+
+    graph.query_vector = _raise_import_error
+    try:
+        triples, meta = retrieve_evidence("What did Apple launch?", graph, top_k=3)
+    finally:
+        graph.query_vector = original
+
+    assert meta["slot"] == "what"
+    assert triples
+    assert triples[0]["subject"] == "apple"
