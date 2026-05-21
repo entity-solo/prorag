@@ -22,7 +22,7 @@ Given a text passage, extract ALL factual statements as triples.
 Return ONLY a JSON array — no markdown, no explanation.
 
 Each triple must be:
-{
+{{
   "subject": "entity name",
   "relation": "relation verb/phrase",
   "object": "entity or value",
@@ -30,7 +30,7 @@ Each triple must be:
   "condition": "",            // e.g. "at 1 atm", "in 1905", leave empty if none
   "domains": ["domain1"],     // one or more: science, history, medicine, law, finance, tech, general
   "confidence": 0.9           // 0.0-1.0, lower if the text is uncertain/speculative
-}
+}}
 
 Rules:
 - "Con mèo KHÔNG đuổi con chuột" → negated: true, relation: "đuổi"
