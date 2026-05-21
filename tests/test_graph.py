@@ -17,7 +17,7 @@ def g():
                      domains=["science"], condition="at 1 atm", source="textbook")
     graph.add_triple("vaccine", "causes", "autism",
                      domains=["medicine"], source="retracted_paper", confidence=0.1)
-    graph.add_triple("vaccine", "NOT causes", "autism",
+    graph.add_triple("vaccine", "causes", "autism",
                      domains=["medicine"], source="cdc", negated=True, confidence=0.99)
     return graph
 

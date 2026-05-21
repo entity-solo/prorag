@@ -5,7 +5,6 @@ Determines which domain subgraph(s) to query for a given question.
 Uses keyword heuristics first (free, instant), then LLM if ambiguous.
 """
 
-import re
 from .llm import call_llm
 
 # Keyword → domain mapping (expand as needed)
@@ -67,7 +66,8 @@ def detect_domains(question: str, llm_model: str = "llama3-70b-8192") -> list[st
     try:
         raw = call_llm(_DETECT_PROMPT.format(question=question), model=llm_model, max_tokens=64)
         raw = raw.strip()
-        import json, re
+        import json
+        import re
         raw = re.sub(r"^```[a-z]*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw)
         result = json.loads(raw)

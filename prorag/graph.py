@@ -7,7 +7,6 @@ import time
 import json
 import networkx as nx
 from dataclasses import dataclass, field, asdict
-from typing import Optional
 
 
 @dataclass
