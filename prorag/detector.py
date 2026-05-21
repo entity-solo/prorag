@@ -6,6 +6,7 @@ Uses keyword heuristics first (free, instant), then LLM if ambiguous.
 """
 
 import re
+import json
 from .llm import call_llm
 
 # Keyword → domain mapping (expand as needed)
@@ -67,8 +68,6 @@ def detect_domains(question: str, llm_model: str = "llama-3.3-70b-versatile") ->
     try:
         raw = call_llm(_DETECT_PROMPT.format(question=question), model=llm_model, max_tokens=64)
         raw = raw.strip()
-        import json
-        import re
         raw = re.sub(r"^```[a-z]*\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw)
         result = json.loads(raw)
