@@ -1,8 +1,8 @@
 # 🧠 ProRAG
 
-**Proactive Knowledge Graph RAG** — continuous learning, no hallucinations from known facts, 5x cheaper than GraphRAG.
+**Proactive Knowledge Graph RAG** — converts text into a knowledge graph, then answers questions by traversing entity-relation paths with semantic vector retrieval.
 
-```
+```bash
 pip install prorag
 ```
 
@@ -10,9 +10,10 @@ pip install prorag
 from prorag import ProRAG
 
 rag = ProRAG()
-rag.ingest("Einstein developed the theory of relativity in 1905 in Bern.")
-result = rag.ask("Where did Einstein develop relativity?")
-# → "Einstein developed the theory of relativity in Bern, Switzerland."
+rag.ingest("Christopher Nolan directed Inception. Inception was filmed in Paris and Tokyo.")
+result = rag.ask("Where was the film directed by Christopher Nolan filmed?")
+print(result["answer"])   # → "Paris and Tokyo"
+print(result["sources"])  # → ["..."]
 ```
 
 ---
@@ -21,48 +22,48 @@ result = rag.ask("Where did Einstein develop relativity?")
 
 | Problem with existing RAG | How ProRAG solves it |
 |---|---|
-| Graph is built *on demand* — slow, incomplete | Graph built **proactively** as you ingest — always ready |
-| 3–5 LLM calls per query (GraphRAG) | **1 LLM call** per query |
-| Full graph search — noisy, expensive | **Domain-partitioned** subgraph search |
-| Knowledge update = retrain or rebuild index | Update = **add a node/edge** (milliseconds, no downtime) |
-| Contradictions silently merged | Contradictions **stored explicitly** with sources |
-| Black box — can't explain an answer | Every answer is **traceable to graph paths** |
-
-### Verified Benchmark (Space Exploration, 15 Docs, 12 Questions)
-
-We compared ProRAG against Naive RAG on an interconnected space exploration history corpus using **`qwen/qwen3-32b`** on Groq.
-
-| Phase / Metric | Naive RAG | **ProRAG** (BFS-Optimized) | Improvement / Difference |
-|---|---|---|---|
-| Ingestion Time | 0.00s | **0.00s** (Fully Cached) | Graph built proactively |
-| F1 Score (Avg) | 0.3539 | **0.5246** | **48% higher word overlap** |
-| Factual Accuracy | 70.8% (8.5/12) | **100.0%** (12/12) | **No failed multi-hop questions** |
-| Query Latency (Avg) | 4.84s | 8.84s | Extra reasoning latency from Qwen |
-| Triples used (Avg) | N/A | **38** | Complete transparency |
-
-> Detailed report & reproduction steps: [docs/benchmark.md](docs/benchmark.md)
+| Keyword search misses synonyms and short names | **Vector similarity** matches semantically — "Ed", "AI", paraphrases all work |
+| Full-text retrieval has no multi-hop reasoning | **BFS graph traversal** connects facts across multiple documents |
+| GraphRAG requires 3–5 LLM calls per query | ProRAG uses **1 LLM call** per query |
+| Contradictions are silently merged | Contradictions **stored explicitly** as `CONTRADICTS` edges with source tracking |
+| No way to trace where an answer came from | Every answer is **traceable to specific graph edges and source documents** |
 
 ---
 
 ## How it works
 
 ```
-Document / text
-      ↓
-[Proactive Extractor]        ← extracts triples continuously as you ingest
-      ↓
-[Domain-Partitioned Graph]   ← science / medicine / law / finance / tech / ...
-      ↑↓
-Query → detect domain → search subgraph → inject context → LLM (once) → Answer
-                                                              ↑
-                                              sources + confidence + contradictions
+┌──────────────────────────────────────────────────────┐
+│  INGESTION                                           │
+│  Raw Text → LLM Extractor (70B) → (subject, relation, object) triples │
+│                                → Normalize → ProRAGGraph (NetworkX)   │
+└──────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│  RETRIEVAL (2-phase vector)                          │
+│                                                      │
+│  Phase 1 — Entity matching                          │
+│    embed(question) → cosine similarity with all nodes│
+│    → top-K entity nodes as seeds                    │
+│                                                      │
+│  Phase 2 — Relation-guided BFS                      │
+│    step_cost = 1 - sim(edge_relation, question)     │
+│    → edges semantically close to question: cost ≈ 0 │
+│    → irrelevant edges: cost ≈ 1 (naturally pruned)  │
+│    → max_hops = 3                                   │
+└──────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│  GENERATION                                          │
+│  Top-K context triples → LLM (8B) → short-phrase answer │
+└──────────────────────────────────────────────────────┘
 ```
 
-**Linguistic support out of the box:**
-- Negation: *"not / never"* → `negated=True` edge flag
-- Passive voice: *"was / by"* → automatically flips subject/object
-- Conditions: *"at 1 atm"*, *"in 1905"* → stored as edge metadata
-- Contradictions: explicitly stored as `CONTRADICTS:relation` edges with separate source tracking
+**What makes retrieval different from standard RAG:**
+- **Phase 1** seeds on semantic similarity, not exact keyword match — short names, abbreviations and synonyms all resolve correctly
+- **Phase 2** uses the question's semantics to guide *which paths to follow*, not just which nodes to start from — the correct branch "lights up" automatically
 
 ---
 
@@ -72,22 +73,12 @@ Query → detect domain → search subgraph → inject context → LLM (once) �
 
 ```bash
 pip install prorag
-# or for local models:
-pip install "prorag[ollama]"
 ```
 
 ### 2. Set your API key
 
 ```bash
-export GROQ_API_KEY=your_key_here   # free tier available at console.groq.com
-```
-
-Supported providers: Groq (default), OpenAI, Anthropic, Ollama (local)
-
-```bash
-# Use Ollama locally (no API key needed)
-export PRORAG_LLM_PROVIDER=ollama
-# make sure ollama is running: ollama serve
+export GROQ_API_KEY=your_key_here   # free tier at console.groq.com
 ```
 
 ### 3. Python API
@@ -97,26 +88,19 @@ from prorag import ProRAG
 
 rag = ProRAG()
 
-# Ingest — add knowledge to the graph
-rag.ingest("Water boils at 100°C at standard atmospheric pressure (1 atm).")
-rag.ingest("At high altitudes, water boils below 100°C due to lower pressure.")
-rag.ingest_file("my_documents/company_policy.txt")
+# Ingest — build the knowledge graph
+rag.ingest("Marie Curie was born in Warsaw in 1867.")
+rag.ingest("Marie Curie won the Nobel Prize in Physics in 1903 and in Chemistry in 1911.")
+rag.ingest("The Nobel Prize in Physics is awarded by the Royal Swedish Academy of Sciences.")
 
-# Ask — one LLM call, grounded answer
-result = rag.ask("At what temperature does water boil?")
+# Ask — 1 LLM call, grounded in graph paths
+result = rag.ask("Who awarded Marie Curie her physics prize?")
+print(result["answer"])       # → "Royal Swedish Academy of Sciences"
+print(result["triples_used"]) # → 5
+print(result["sources"])      # → ["..."]
 
-print(result["answer"])
-# → "Water boils at 100°C at standard atmospheric pressure.
-#    At high altitudes, it boils at lower temperatures."
-
-print(result["sources"])    # ["my_file.txt"]
-print(result["domains"])    # ["science"]
-print(result["triples_used"])  # 4
-
-# Persist — save graph to disk (milliseconds)
+# Persist
 rag.save("my_graph.json")
-
-# Load — restore later
 rag.load("my_graph.json")
 ```
 
@@ -136,31 +120,38 @@ prorag interactive --graph my_graph.json
 prorag stats --graph my_graph.json
 ```
 
-### 5. Streamlit demo
-
-```bash
-pip install "prorag[demo]"
-streamlit run examples/demo_app.py
-```
-
 ---
 
 ## Key design decisions
 
 ### Proactive extraction
-Unlike RAG systems that build context at query time, ProRAG extracts knowledge **as you ingest**. When a query arrives, the graph is already complete — no on-demand processing.
+ProRAG extracts knowledge **at ingest time**, not at query time. When a query arrives, the graph is already complete — no on-demand LLM extraction.
 
-### Domain partitioning
-Each node is tagged with one or more domains (`science`, `medicine`, `law`, `finance`, `tech`, `geography`, `general`). Queries are scoped to relevant subgraphs — faster retrieval, less noise, lower token cost.
+### 2-phase vector retrieval
+Standard BFS blindly expands all neighbors with equal cost. ProRAG's BFS uses **semantic edge scoring**: `step_cost = 1 - cosine_similarity(edge_relation, question)`. Relations close in meaning to the question get low cost and are traversed first. Irrelevant branches are naturally deprioritized without any hard cutoffs.
 
 ### Contradiction handling
-When two sources disagree, ProRAG stores **both claims** with a `CONTRADICTS:relation` edge and tracks each source independently. The LLM receives the full picture and can reason about conflicting information rather than silently picking one.
+When two sources disagree, ProRAG stores **both claims** with a `CONTRADICTS:relation` edge. The LLM receives the full picture — including which source says what — and can reason about the conflict rather than silently picking one side.
 
 ### One LLM call per query
-The graph does the heavy lifting. By the time the question reaches the LLM, the context is already curated, filtered, and formatted. No multi-hop LLM traversal needed.
+The graph and vector retrieval do the heavy lifting. By the time the question reaches the LLM, context is already curated, filtered, and ranked. No multi-hop LLM reasoning chains needed.
 
 ### Explainable by design
-Every answer can be traced back to specific nodes, edges, and source documents. Debugging is `find wrong node → fix edge` instead of `try another prompt`.
+Every answer is traced to specific graph edges and source documents. Debugging is `find wrong edge → fix extraction` instead of `try another prompt`.
+
+---
+
+## Benchmark
+
+Evaluated on **HotpotQA** (multi-hop QA dataset) comparing ProRAG vs. Naive RAG:
+
+| | Naive RAG | ProRAG |
+|---|---|---|
+| Extraction model | — | `llama-3.3-70b-versatile` |
+| QA model | `llama-3.1-8b-instant` | `llama-3.1-8b-instant` |
+| Retrieval | keyword + top-3 chunks | 2-phase vector BFS |
+
+> Full results in [`docs/benchmark.md`](docs/benchmark.md)
 
 ---
 
@@ -169,48 +160,40 @@ Every answer can be traced back to specific nodes, edges, and source documents. 
 ```python
 from prorag import ProRAG
 
-# Use a different model
-rag = ProRAG(model="mixtral-8x7b-32768")
+# Separate extractor and QA models
+rag = ProRAG(model="llama-3.1-8b-instant")   # QA model
 
-# Use OpenAI
-import os
-os.environ["PRORAG_LLM_PROVIDER"] = "openai"
-os.environ["OPENAI_API_KEY"] = "sk-..."
-rag = ProRAG(model="gpt-4o-mini")
-
-# Use local Ollama
-os.environ["PRORAG_LLM_PROVIDER"] = "ollama"
-rag = ProRAG(model="llama3")
+# Use a different embedding model
+from prorag.embeddings import EmbeddingStore
+store = EmbeddingStore(model_name="all-mpnet-base-v2")  # higher accuracy, larger
 ```
 
 ---
 
 ## Roadmap
 
-- [x] Core graph engine with domain partitioning
-- [x] Proactive extractor (LLM-based triple extraction)
-- [x] Negation and passive voice handling (Vietnamese + English)
-- [x] Contradiction detection and storage
-- [x] CLI + Streamlit demo
+- [x] Core graph engine (NetworkX MultiDiGraph)
+- [x] LLM-based triple extraction with negation, passive voice, nested facts
+- [x] Contradiction detection and explicit storage
+- [x] 2-phase vector retrieval (entity cosine seed + relation-guided BFS)
+- [x] CLI + Python API
+- [x] HotpotQA benchmark script (`scripts/run_benchmark.py`)
+- [ ] GraphRAG baseline for benchmark comparison
 - [ ] Async ingestion pipeline
 - [ ] PDF / Markdown ingestion
-- [ ] REST API server (`prorag serve`)
 - [ ] Graph visualization UI
-- [x] HotpotQA / MuSiQue benchmark scripts (implemented in `scripts/run_benchmark.py`)
-- [x] Topic-based & Superpowers demo scripts (implemented in `scripts/run_benchmark_topic_large.py` and `scripts/demo_superpowers.py`)
-- [ ] Fine-tuned extractor for domain-specific triples
-- [ ] Multi-tenant graph isolation
+- [ ] Fine-tuned extractor for higher extraction quality
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. To run tests:
-
 ```bash
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+
+Issues and PRs welcome.
 
 ---
 
