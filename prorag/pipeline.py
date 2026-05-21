@@ -11,9 +11,8 @@ Flow:
     → answer + sources
 """
 
-import re
 from .graph import ProRAGGraph
-from .detector import detect_domains
+from .detector import detect_domains, _keywords_from_question
 from .llm import call_llm
 
 _ANSWER_PROMPT = """\
@@ -52,7 +51,7 @@ def answer(
         }
     """
     # 1 — detect domains
-    domains = detect_domains(question, llm_model=llm_model)
+    domains = detect_domains(question, graph=graph, llm_model=llm_model)
 
     # 2 — extract keywords from the question
     keywords = _keywords_from_question(question)
@@ -93,17 +92,6 @@ def answer(
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _keywords_from_question(question: str) -> list[str]:
-    """Extract candidate keywords — stopword-filtered tokens."""
-    stopwords = {
-        "what", "who", "when", "where", "why", "how", "is", "are", "was", "were",
-        "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or",
-        "did", "does", "do", "which", "also", "originally", "should", "could", "would",
-        "that", "this", "these", "those", "by", "with", "from", "about", "into",
-        "cái", "gì", "là", "của", "và", "ở", "tại", "khi", "nào", "có",
-    }
-    tokens = re.findall(r"\b\w{3,}\b", question.lower())
-    return [t for t in tokens if t not in stopwords]
 
 
 def _format_context(triples: list[dict]) -> tuple[str, list[str], bool]:

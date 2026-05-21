@@ -56,7 +56,12 @@ class ProRAGGraph:
         confidence: float = 1.0,
     ) -> None:
         """Add (subject, relation, object) to the graph."""
-        domains = domains or ["general"]
+        # Normalize strings to strip whitespaces and use lowercase
+        subject = subject.strip().lower()
+        relation = relation.strip().lower()
+        obj = obj.strip().lower()
+        domains = [d.strip().lower() for d in (domains or ["general"])]
+        
         now = time.time()
 
         for node, label in [(subject, subject), (obj, obj)]:
@@ -146,31 +151,59 @@ class ProRAGGraph:
                 if kw_lower in node.lower():
                     candidate_nodes.add(node)
 
-        # Domain filter
+        # Domain filter (hierarchical prefix matching on index)
+        allowed = set()
         if domains:
-            allowed = set()
-            for d in domains:
-                allowed |= self._domain_index.get(d, set())
+            for query_d in domains:
+                query_d_lower = query_d.strip().lower()
+                query_d_slash = query_d_lower if query_d_lower.endswith("/") else query_d_lower + "/"
+                for index_d, nodes in self._domain_index.items():
+                    if index_d == query_d_lower or index_d.startswith(query_d_slash):
+                        allowed |= nodes
             candidate_nodes &= allowed
 
         if not candidate_nodes:
             return []
 
-        # BFS to expand and compute distance from candidate_nodes
-        distances = {node: 0 for node in candidate_nodes}
-        frontier = set(candidate_nodes)
-        for hop in range(1, max_hops + 1):
-            next_frontier = set()
-            for node in frontier:
-                neighbors = set(self.g.successors(node)) | set(self.g.predecessors(node))
-                if domains:
-                    neighbors &= allowed
-                for n in neighbors:
-                    if n not in distances:
-                        distances[n] = hop
-                        next_frontier.add(n)
-            frontier = next_frontier
+        # Dijkstra-like BFS traversal with crossing-boundary penalty
+        # Initialize distances for candidate_nodes to 0.0
+        distances = {node: 0.0 for node in candidate_nodes}
+        import heapq
+        queue = [(0.0, node) for node in candidate_nodes]
+        heapq.heapify(queue)
 
+        def get_top_levels(n):
+            meta = self.g.nodes[n].get("meta")
+            if not meta or not meta.domains:
+                return {"general"}
+            return {d.split("/")[0] for d in meta.domains}
+
+        while queue:
+            dist, node = heapq.heappop(queue)
+            if dist > distances[node]:
+                continue
+            if dist >= max_hops:
+                continue
+
+            neighbors = set(self.g.successors(node)) | set(self.g.predecessors(node))
+            node_top_levels = get_top_levels(node)
+            for neighbor in neighbors:
+                neighbor_top_levels = get_top_levels(neighbor)
+                # If query domains are scoped, apply a +1.0 penalty if the neighbor node
+                # does not belong to any of the query's active top-level domains.
+                # Otherwise, check if the current node and neighbor share any top-level domain.
+                if domains:
+                    query_top_levels = {d.split("/")[0] for d in domains}
+                    shares_query = bool(neighbor_top_levels & query_top_levels)
+                    step_cost = 1.0 if shares_query else 2.0
+                else:
+                    shares_top = bool(node_top_levels & neighbor_top_levels)
+                    step_cost = 1.0 if shares_top else 2.0
+
+                new_dist = dist + step_cost
+                if new_dist <= max_hops and (neighbor not in distances or new_dist < distances[neighbor]):
+                    distances[neighbor] = new_dist
+                    heapq.heappush(queue, (new_dist, neighbor))
         expanded = set(distances.keys())
 
         # Helper to compute keyword relevance score
@@ -182,6 +215,21 @@ class ProRAGGraph:
                     score += 1
             return score
 
+        # Helper to check if a node matches any query domains (prefix check)
+        def matches_query_domains(n, query_domains):
+            if not query_domains:
+                return True
+            meta = self.g.nodes[n].get("meta")
+            if not meta or not meta.domains:
+                return False
+            for query_d in query_domains:
+                query_d_lower = query_d.strip().lower()
+                query_d_slash = query_d_lower if query_d_lower.endswith("/") else query_d_lower + "/"
+                for d in meta.domains:
+                    if d == query_d_lower or d.startswith(query_d_slash):
+                        return True
+            return False
+
         # Collect triples
         triples = []
         for src in expanded:
@@ -189,7 +237,17 @@ class ProRAGGraph:
                 if tgt not in expanded:
                     continue
                 m: EdgeMeta = data["meta"]
-                dist = min(distances.get(src, max_hops), distances.get(tgt, max_hops))
+                dist = min(distances.get(src, float(max_hops)), distances.get(tgt, float(max_hops)))
+                
+                # Apply taxonomy match boost: reduce effective distance by 0.5
+                # if either subject or object matches the query domains
+                effective_dist = dist
+                if domains:
+                    src_match = matches_query_domains(src, domains)
+                    tgt_match = matches_query_domains(tgt, domains)
+                    if src_match and tgt_match:
+                        effective_dist -= 0.5
+                
                 triples.append({
                     "subject": src,
                     "relation": data["relation"],
@@ -199,10 +257,11 @@ class ProRAGGraph:
                     "confidence": m.confidence,
                     "sources": m.sources,
                     "distance": dist,
+                    "effective_distance": effective_dist,
                 })
 
-        # Sort by: 1. Relevance (desc), 2. Seed Distance (asc), 3. Confidence (desc)
-        triples.sort(key=lambda x: (-get_relevance(x), x["distance"], -x["confidence"]))
+        # Sort by: 1. Relevance (desc), 2. Effective Distance (asc), 3. Confidence (desc)
+        triples.sort(key=lambda x: (-get_relevance(x), x["effective_distance"], -x["confidence"]))
         return triples[:top_k]
 
     def get_domains(self) -> list[str]:

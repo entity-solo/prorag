@@ -28,15 +28,26 @@ Each triple must be:
   "object": "entity or value",
   "negated": false,           // true if the relation is denied ("không", "not", etc.)
   "condition": "",            // e.g. "at 1 atm", "in 1905", leave empty if none
-  "domains": ["domain1"],     // one or more: science, history, medicine, law, finance, tech, general
+  "structural_tags": ["tag1"], // one or more path-like hierarchical tags, e.g. ["bo_luat_lao_dong_2019/chuong_3/dieu_49"] or ["paracetamol/chong_chi_dinh"]
   "confidence": 0.9           // 0.0-1.0, lower if the text is uncertain/speculative
 }}
 
-Rules:
+Rules for Entities and Relations:
+- Normalize entity names: Always use lowercase, resolve abbreviations to full names (e.g. "BLLĐ 2019" -> "bộ luật lao động 2019"), and strip redundant qualifiers like "công ty", "tập đoàn" if they aren't part of the proper name.
+- Do NOT over-merge distinct technical terms (e.g., keep "suy gan" and "xơ gan" separate, keep "hợp đồng lao động" and "hợp đồng dịch vụ" separate).
 - "Con mèo KHÔNG đuổi con chuột" → negated: true, relation: "đuổi"
 - "Con chuột BỊ con mèo đuổi" → same as active form, just flip subject/object
 - Break compound sentences into multiple triples.
+- Extract nested/implicit facts hidden in titles, appositives, or modifier phrases. For example, "CEO Apple Tim Cook cho ra mắt iPhone 17" contains two distinct facts:
+  1) {{"subject": "tim cook", "relation": "là ceo của", "object": "apple"}}
+  2) {{"subject": "tim cook", "relation": "cho ra mắt", "object": "iphone 17"}}
 - Use concise, lowercase relation strings ("is a", "causes", "located in", etc.)
+
+Rules for Structural Tags:
+- Identify structural parent-child path tags for each triple based on the document's logical/physical layout.
+- For structured texts like laws, build the hierarchy based on document structure: e.g. ["bo_luat_lao_dong_2019/chuong_3/dieu_49/khoan_2"].
+- For unstructured texts like articles or medicine, build based on entity relationships: e.g. ["paracetamol/chong_chi_dinh"] or ["iphone_15/man_hinh/tan_so_quet"].
+- Always format tags as lowercase path-like strings with slashes.
 
 Text:
 \"\"\"
@@ -56,6 +67,11 @@ def extract_triples(
     prompt = _EXTRACT_PROMPT.format(text=text.strip())
     raw = call_llm(prompt, model=llm_model, max_tokens=2048)
     triples = _parse_json_array(raw)
+
+    for t in triples:
+        # Map structural_tags to domains to maintain backward compatibility
+        tags = t.get("structural_tags", t.get("domains", ["general"]))
+        t["domains"] = tags
 
     if extra_domains:
         for t in triples:

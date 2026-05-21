@@ -1,143 +1,111 @@
-# Architecture
+# ProRAG System Architecture
 
-## Overview
-
-ProRAG is built around four loosely coupled components:
+This document describes the complete architecture of ProRAG, covering the core open-source graph engine, query routing optimizations, and the SaaS multi-tenant control plane.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         ProRAG                               │
-│                                                             │
-│  ┌──────────────┐    ┌──────────────────────────────────┐   │
-│  │   Extractor  │───▶│     ProRAGGraph                  │   │
-│  │              │    │  (domain-partitioned, persistent) │   │
-│  │ text → triples│   │                                  │   │
-│  └──────────────┘    └──────────────────┬───────────────┘   │
-│                                         │                   │
-│  ┌──────────────┐    ┌──────────────────▼───────────────┐   │
-│  │   Detector   │───▶│     Pipeline                     │   │
-│  │              │    │  1. detect domain                │   │
-│  │ question →   │    │  2. query subgraph               │   │
-│  │ domain(s)   │    │  3. format context               │   │
-│  └──────────────┘    │  4. single LLM call              │   │
-│                      └──────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+                  ┌──────────────────────────────────────────────┐
+                  │               1. INGESTION                   │
+                  │  [Raw text]                                  │
+                  │       │                                      │
+                  │       ▼                                      │
+                  │  [LLM Extractor] ──▶ Extracts explicit &     │
+                  │                      nested facts            │
+                  │       │                                      │
+                  │       ▼                                      │
+                  │  [Normalizer] ──▶ lowercase, trim, & merge   │
+                  │       │                                      │
+                  │       ▼                                      │
+                  │  [ProRAGGraph] ──▶ In-memory MultiDiGraph    │
+                  └───────┬──────────────────────────────────────┘
+                          │ (persist on disk / RAM)
+                          ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │                        2. RETRIEVAL                           │
+ │  [Question]                                                   │
+ │       │                                                       │
+ │       ├───────────────┐                                       │
+ │       ▼               ▼                                       │
+ │  [Keywords]    [Graph Route] ──▶ Zero-latency active tags     │
+ │       │               │          lookup (no LLM latency)      │
+ │       ▼               │                                       │
+ │  [Seed Nodes] ◀───────┘                                       │
+ │       │                                                       │
+ │       ▼                                                       │
+ │  [Dijkstra BFS] ──▶ Traverses paths up to 2 hops              │
+ │                     - Crossing-boundary penalty (+1.0 hop)    │
+ │                     - Taxonomy matching boost (-0.5 dist)     │
+ │       │                                                       │
+ │       ▼                                                       │
+ │  [Context Triples] (Sorted by relevance & effective distance) │
+ └───────┬───────────────────────────────────────────────────────┘
+         │
+         ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │                       3. GENERATION                           │
+ │  [Clean Triples] + [Contradictions Warn]                      │
+ │       │                                                       │
+ │       ▼                                                       │
+ │  [LLM Generator] ──▶ Synthesizes final answer with sources     │
+ └───────────────────────────────────────────────────────────────┘
 ```
 
-## Component details
+---
 
-### `graph.py` — ProRAGGraph
+## 1. Core Ingestion & Representation
 
-The core data structure. A `networkx.MultiDiGraph` where:
+### Entity Normalization
+To prevent duplicated nodes and broken query paths, all subjects and objects are stripped and lowercased (`strip().lower()`) during ingestion. This merges identical entities (e.g. `"Paracetamol"` and `"paracetamol"`) while keeping distinct technical terms separate.
 
-- **Nodes** represent entities. Each node carries `NodeMeta`:
-  - `sources`: which documents mention this entity
-  - `confidence`: 0–1 credibility score
-  - `domains`: list of knowledge domains this entity belongs to
-  - `updated_at`: timestamp of last update
+### Nested Fact Extraction (Modifiers & Appositives)
+The LLM extractor is prompted to extract both the main action and any nested background facts hidden inside noun modifiers, titles, or appositive phrases. 
+- *Input*: `"CEO Apple Tim Cook cho ra mắt iPhone 17"`
+- *Extracted Triples*:
+  1. `(tim cook, là ceo của, apple)`
+  2. `(tim cook, cho ra mắt, iphone 17)`
+This ensures the physical graph structure holds the necessary bridges to support multi-hop questions (e.g., matching the company to the product via the CEO) naturally.
 
-- **Edges** represent relations. Each edge carries `EdgeMeta`:
-  - `relation`: verb or relation phrase
-  - `negated`: `True` if the relation is denied (handles "không", "not", etc.)
-  - `condition`: contextual qualifier ("at 1 atm", "in 1905")
-  - `sources`, `confidence`, `updated_at`
+### Self-Building Hierarchical Taxonomy
+Predefined domains are replaced by self-building, path-like hierarchical structural tags (e.g. `bo_luat_lao_dong_2019/chuong_3/dieu_49/khoan_2` or `paracetamol/chong_chi_dinh`) inferred by the LLM from the document layout.
 
-**Contradiction handling:**
-When a new triple directly contradicts an existing one (same subject, relation, object, but opposite `negated` flag), ProRAG:
-1. Lowers the confidence of the existing edge by 30%
-2. Adds a `CONTRADICTS:relation` edge pointing to the contested object
-3. Keeps both claims with their respective sources
+---
 
-This means the LLM always sees the full picture — no silent overwriting.
+## 2. Zero-Latency Routing & BFS Retrieval
 
-**Domain index:**
-An in-memory `dict[domain → set[node_id]]` allows O(1) subgraph filtering at query time.
+### Graph-Based Routing
+Rather than calling an LLM to classify query domains, ProRAG extracts keywords from the question, matches them against nodes in the graph, and aggregates the active structural tags (domains) associated with those matching nodes. This completes in sub-milliseconds (down from 8s LLM latency).
 
-**Relevance & Seed Distance Query Ranking:**
-When query keywords are traversed, candidate seed nodes are retrieved and expanded using BFS up to `max_hops`. Triples in the expanded subgraph are ranked using a composite key:
-1. **Relevance**: Count of query keywords present in the triple's subject, relation, or object text (higher matches first).
-2. **Seed Distance**: The minimum BFS distance (hop count) of the triple's nodes from the initial seed nodes (closer to seeds first).
-3. **Confidence**: The triple's credibility score (higher confidence first).
-This prevents critical multi-hop information from being discarded arbitrarily by flat confidence sorting.
+### Scoped Dijkstra-like BFS Traversal
+BFS starting from seed nodes expands paths up to `max_hops = 2` with customized edge weights:
+- **Explicit Edge**: Base cost of `1.0` hop.
+- **Crossing-Boundary Penalty**: If the traversal hops between nodes that do not share active query domains, a penalty of `+1.0` is added to the hop cost. This prevents the search from wandering into irrelevant subgraphs.
+- **Taxonomy Match Boost**: If both endpoints of a triple match the query's active taxonomy tags, its effective distance is reduced by `-0.5`, prioritizing it during context packaging.
 
-### `extractor.py`
+### Query sorting
+Context triples are packaged and sorted by:
+1. **Keyword Relevance**: The number of query keywords appearing in the triple.
+2. **Effective Distance**: The shortest distance from seeds, incorporating boundary penalties and taxonomy boosts.
+3. **Confidence**: The factual credibility score.
 
-Converts raw text to triples via a single LLM prompt. The prompt instructs the model to:
-- Return a JSON array of triples (no markdown)
-- Flag negation explicitly (`negated: true`)
-- Assign domain labels
-- Set confidence based on hedging language in the source text
-- Include conditions on relations
+---
 
-Text is chunked at sentence boundaries to stay within context limits.
+## 3. Multi-Tenant SaaS Control Plane
 
-### `detector.py`
-
-Two-stage domain detection:
-1. **Keyword scan** — a hardcoded `domain → keywords` dict covers ~80% of questions for free (zero LLM tokens)
-2. **LLM fallback** — used only when keyword scan returns nothing; prompts for a JSON array of domain names
-
-### `pipeline.py`
-
-The query path:
-1. `detect_domains(question)` — keyword scan or LLM
-2. `_keywords_from_question(question)` — extracts query tokens and filters them using an extended list of grammatical structural stopwords (e.g. `originally`, `which`, `also`, `did`) to prevent noisy seed node matches.
-3. `graph.query(keywords, domains=...)` — BFS expansion from seed nodes, retrieving up to `max_context_triples = 60` (default).
-4. If results are sparse (less than 15 triples), fallback to query the entire graph without domain filtering (`domains=None`).
-5. `_format_context(triples)` — render as bullet list with conditions, confidence, and contradiction flags
-6. Single LLM call with `_ANSWER_PROMPT`
-7. Append contradiction warning if any `CONTRADICTS` edges appeared in context
-
-### `llm.py`
-
-Provider-agnostic adapter. Reads `PRORAG_LLM_PROVIDER` env var to select:
-- `groq` (default)
-- `openai`
-- `ollama`
-- `anthropic`
-
-All providers share the same `call_llm(prompt, model, max_tokens, system)` signature.
-
-## Data flow example
+ProRAG's SaaS wrapper provides commercial security, isolation, and billing management:
 
 ```
-Input: "Einstein did not work at the patent office."
-
-Extractor:
-  → subject: "Einstein"
-  → relation: "work at"
-  → object: "patent office"
-  → negated: true
-  → confidence: 0.9
-  → domains: ["history"]
-
-Graph (existing edge):
-  Einstein --[work at]--> patent office   (confidence: 1.0, source: wiki)
-
-Contradiction detection:
-  Existing edge: negated=False
-  New triple: negated=True
-  → Lower existing confidence to 0.7
-  → Add CONTRADICTS:work at edge (confidence: 0.5)
-
-Graph after:
-  Einstein --[work at]--> patent office          (confidence: 0.7, source: wiki)
-  Einstein --[CONTRADICTS:work at]--> patent office  (confidence: 0.5, source: new_doc)
-
-Query result includes both; LLM receives:
-  - Einstein work at patent office (confidence: 0.7)
-  - ⚠️ CONTRADICTS work at patent office (confidence: 0.5)
-  Answer includes: "⚠️ Note: conflicting information exists — see sources."
+Developer / Client
+       │ (API Key / JWT)
+       ▼
+[FastAPI Gateway] ──▶ [Quota & Rate Limiter] ──▶ [Database (SQLite)]
+       │              (Checks user limit)         - User Accounts
+       ▼                                          - API Keys / Logs
+[User Graph Scope]                                - Subscriptions
+       │
+       ▼
+[Isolated JSON File] (data/graphs/{user_id}/{graph_id}.json)
 ```
 
-## Performance characteristics
-
-| Operation | Complexity | Notes |
-|---|---|---|
-| `add_triple` | O(1) amortized | Hash-based node lookup |
-| `query` (with domain) | O(k·h) | k = domain nodes, h = hop depth |
-| `query` (no domain) | O(n·h) | n = all nodes |
-| `save` / `load` | O(n+e) | JSON serialization |
-| Domain detection | O(w) or 1 LLM call | w = words in question |
-
-For graphs up to ~100K nodes, `networkx` is sufficient. Beyond that, replace the backend with Neo4j using the same `ProRAGGraph` interface.
+1. **Authentication & Isolation**: Requests are authenticated via JWT or secure developer API keys. Node operations and graphs are scoped to isolated physical directories (`data/graphs/{user_id}/`).
+2. **Request Interceptor Logging**: A FastAPI middleware intercepts traffic, records method, endpoint, status code, and latency, and persists metrics to SQLite while ignoring administrative and public endpoints.
+3. **Quota & Rate Limiting**: The middleware tracks monthly request usage against the user's plan limit, rejecting exceeding requests with `429 Too Many Requests`.
+4. **Billing & Subscriptions**: Real-time payment simulation updates user plans (e.g., Free to Pro) to upgrade quotas instantly.

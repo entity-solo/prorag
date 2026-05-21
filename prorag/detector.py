@@ -1,94 +1,54 @@
 """
-Domain detector — fast, rule-first, LLM fallback.
+Domain detector — fast, graph-based routing.
 
-Determines which domain subgraph(s) to query for a given question.
-Uses keyword heuristics first (free, instant), then LLM if ambiguous.
+Determines which structural path tag(s) to query for a given question by
+matching question keywords to existing graph entities and their associated tags.
 """
 
 import re
-import json
-from .llm import call_llm
 
-# Keyword → domain mapping (expand as needed)
-_DOMAIN_KEYWORDS: dict[str, list[str]] = {
-    "science": [
-        "physics", "chemistry", "biology", "quantum", "atom", "molecule",
-        "vật lý", "hóa học", "sinh học", "lượng tử",
-    ],
-    "medicine": [
-        "disease", "drug", "symptom", "diagnosis", "treatment", "vaccine",
-        "bệnh", "thuốc", "triệu chứng", "chẩn đoán", "điều trị",
-    ],
-    "history": [
-        "war", "century", "king", "empire", "revolution", "dynasty",
-        "chiến tranh", "thế kỷ", "vua", "đế chế", "triều đại",
-    ],
-    "law": [
-        "law", "regulation", "court", "contract", "legal", "statute",
-        "luật", "quy định", "tòa án", "hợp đồng", "pháp lý",
-    ],
-    "finance": [
-        "stock", "revenue", "profit", "investment", "bank", "interest",
-        "cổ phiếu", "doanh thu", "lợi nhuận", "đầu tư", "ngân hàng",
-    ],
-    "tech": [
-        "software", "algorithm", "network", "database", "api", "model",
-        "phần mềm", "thuật toán", "mạng", "cơ sở dữ liệu", "mô hình",
-    ],
-    "geography": [
-        "country", "city", "river", "mountain", "continent",
-        "quốc gia", "thành phố", "sông", "núi", "châu lục",
-    ],
-}
-
-_DETECT_PROMPT = """\
-Given this question, list the relevant knowledge domains (1-3) from this list:
-science, medicine, history, law, finance, tech, geography, general
-
-Return only a JSON array of strings, e.g. ["science", "history"]
-
-Question: {question}
-
-JSON array:"""
+def _keywords_from_question(question: str) -> list[str]:
+    """Extract candidate keywords — stopword-filtered tokens."""
+    stopwords = {
+        "what", "who", "when", "where", "why", "how", "is", "are", "was", "were",
+        "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or",
+        "did", "does", "do", "which", "also", "originally", "should", "could", "would",
+        "that", "this", "these", "those", "by", "with", "from", "about", "into",
+        "cái", "gì", "là", "của", "và", "ở", "tại", "khi", "nào", "có",
+    }
+    # Match words of length 3 or more, keeping Vietnamese characters intact
+    tokens = re.findall(r"\b\w{3,}\b", question.lower())
+    return [t for t in tokens if t not in stopwords]
 
 
-def detect_domains(question: str, llm_model: str = "llama-3.3-70b-versatile") -> list[str]:
+def detect_domains(question: str, graph=None, llm_model: str = "llama-3.3-70b-versatile") -> list[str]:
     """
-    Returns the most relevant domain(s) for a question.
+    Returns the most relevant domain(s)/structural tags for a question.
 
     Strategy:
-    1. Fast keyword scan — covers ~80% of questions for free
-    2. LLM fallback for ambiguous or cross-domain questions
+    1. Fast entity/keyword extraction from the question.
+    2. Lookup in the graph to find matching nodes.
+    3. Collect all unique structural tags (domains) associated with matching nodes.
+    4. Fallback to ["general"] if no graph is provided or no tags are found.
     """
-    domains = _keyword_scan(question)
-    if domains:
-        return domains
+    if graph is None:
+        return ["general"]
 
-    # LLM fallback
-    try:
-        raw = call_llm(_DETECT_PROMPT.format(question=question), model=llm_model, max_tokens=64)
-        raw = raw.strip()
-        raw = re.sub(r"^```[a-z]*\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-        result = json.loads(raw)
-        if isinstance(result, list) and result:
-            return [str(d) for d in result]
-    except Exception:
-        pass
+    keywords = _keywords_from_question(question)
+    if not keywords:
+        return ["general"]
 
-    return ["general"]
+    matched_domains = set()
+    for kw in keywords:
+        kw_lower = kw.lower()
+        for node, node_data in graph.g.nodes(data=True):
+            if kw_lower in node.lower():
+                meta = node_data.get("meta")
+                if meta and meta.domains:
+                    for d in meta.domains:
+                        matched_domains.add(d)
 
+    if not matched_domains:
+        return ["general"]
 
-
-
-def _keyword_scan(text: str) -> list[str]:
-    """Return domains whose keywords appear in the text as whole words."""
-    text_lower = text.lower()
-    matched = []
-    for domain, keywords in _DOMAIN_KEYWORDS.items():
-        for kw in keywords:
-            pattern = r"\b" + re.escape(kw) + r"\b"
-            if re.search(pattern, text_lower):
-                matched.append(domain)
-                break
-    return matched
+    return sorted(list(matched_domains))
