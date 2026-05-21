@@ -194,7 +194,8 @@ rag = ProRAG(model="llama3")
 - [ ] PDF / Markdown ingestion
 - [ ] REST API server (`prorag serve`)
 - [ ] Graph visualization UI
-- [ ] HotpotQA / MuSiQue benchmark scripts
+- [x] HotpotQA / MuSiQue benchmark scripts (implemented in `scripts/run_benchmark.py`)
+- [x] Topic-based & Superpowers demo scripts (implemented in `scripts/run_benchmark_topic_large.py` and `scripts/demo_superpowers.py`)
 - [ ] Fine-tuned extractor for domain-specific triples
 - [ ] Multi-tenant graph isolation
 

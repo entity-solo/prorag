@@ -78,6 +78,31 @@ These results were run locally using `llama-3.3-70b-versatile` on Groq.
 | Estimated Tokens/query | 154 | 2009 (ingest included) |
 
 
+## Topic-Based Space Exploration Benchmark (15 Documents, 12 Questions)
+
+This benchmark evaluates multi-hop reasoning capabilities on a unified knowledge graph representing the history of space exploration (Apollo missions, Soviet Vostok programs, spacecraft designers, and telescope repairs).
+
+### Comparison Summary
+
+| Phase / Metric | Naive RAG | **ProRAG** (Improved) |
+|---|---|---|
+| Ingestion Time | 0.00s | **22.19s** (Built once) |
+| F1 Score (Avg) | 0.3845 | **0.4364** |
+| Factual / Semantic Accuracy | **70.8%** (8.5/12 correct) | **83.3%** (10/12 correct) |
+| Query Latency (Avg) | 1.51s | **1.75s** |
+| Triples used (Avg) | N/A | **30** |
+
+### Key Takeaways
+1. **Multi-Hop Traversal**: Naive RAG failed completely on 3 out of 12 questions requiring 3+ reasoning steps (e.g. looking up Frank Borman's birth city from a query about the commander of Apollo 8, or identifying Dwight D. Eisenhower as the president who founded NASA, which managed the Apollo 11 moon landing). ProRAG correctly resolved these links by traversing the graph.
+2. **Precision Keywords**: ProRAG filters grammatical noise using a custom stopword detector, extracting clean entities for node seeding.
+3. **Query Relevance & Hop Distance**: ProRAG ranks retrieved triples using a composite score of keyword relevance and shortest path distance from query seed nodes. This prevents critical triples from being discarded by flat confidence thresholds.
+
+## Core Superpowers Demo (`scripts/demo_superpowers.py`)
+A side-by-side CLI demonstration comparing both systems across:
+- **4-Hop reasoning**: Traversing `Alice -> Bob -> Charlie -> Seattle -> Washington` to find where Alice's father-in-law lives.
+- **Knowledge conflict detection**: Flagging contradictory medical claims (vaccines vs autism) and raising the graph-level warning.
+- **Real-time instant updates**: Ingesting a new project lead ("Elena replaces David") and reflecting the change immediately on query without rebuilding any vector indexes.
+
 ## Known limitations
 
 - Benchmark corpus is English-only for now; Vietnamese results pending
