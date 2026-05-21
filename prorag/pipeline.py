@@ -64,7 +64,7 @@ def answer(
     try:
         triples = graph.query_vector(
             question,
-            max_hops=3,
+            max_cost=2.0,
             top_k=max_context_triples,
             seed_k=10,
             seed_threshold=0.25,

@@ -289,7 +289,7 @@ class ProRAGGraph:
     def query_vector(
         self,
         question: str,
-        max_hops: int = 3,
+        max_cost: float = 2.0,
         top_k: int = 60,
         seed_k: int = 10,
         seed_threshold: float = 0.25,
@@ -298,9 +298,12 @@ class ProRAGGraph:
         2-phase vector retrieval:
           Phase 1 — Entity matching: embed question, find top-K similar nodes
                     via cosine similarity → seed nodes.
-          Phase 2 — Relation-guided BFS: edge step cost = 1 - sim(edge_relation, question)
-                    → edges semantically close to the question get low cost
-                    → naturally "lights up" the relevant path.
+          Phase 2 — Relation-guided BFS with semantic cost:
+                    step_cost = 1 - sim(edge_relation_or_neighbor, question)
+                    Total path cost accumulates. BFS stops when cost >= max_cost.
+                    → Relevant edges (cost≈0) allow deep traversal.
+                    → Irrelevant edges (cost≈1) are naturally pruned after 1 hop.
+                    No hard hop limit needed — the semantic cost is the cutoff.
         """
         from .embeddings import EmbeddingStore
         store = EmbeddingStore()
@@ -325,7 +328,7 @@ class ProRAGGraph:
 
         while queue:
             dist, node = heapq.heappop(queue)
-            if dist > distances[node] or dist >= max_hops:
+            if dist > distances[node] or dist >= max_cost:
                 continue
 
             # Traverse both outgoing and incoming edges (bidirectional)
@@ -349,7 +352,7 @@ class ProRAGGraph:
                 step_cost = 1.0 - max(0.0, best_sim)
 
                 new_dist = dist + step_cost
-                if new_dist <= max_hops and (
+                if new_dist < max_cost and (
                     neighbor not in distances or new_dist < distances[neighbor]
                 ):
                     distances[neighbor] = new_dist
@@ -365,8 +368,8 @@ class ProRAGGraph:
                     continue
                 m: EdgeMeta = data["meta"]
                 dist = min(
-                    distances.get(src, float(max_hops)),
-                    distances.get(tgt, float(max_hops)),
+                    distances.get(src, max_cost),
+                    distances.get(tgt, max_cost),
                 )
                 # Score the whole triple string against the question
                 triple_text = f"{src} {data['relation']} {tgt}"
