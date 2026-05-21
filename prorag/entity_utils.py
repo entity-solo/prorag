@@ -1,9 +1,5 @@
 """
 Entity normalization and unresolved-reference helpers.
-
-These utilities are shared by ingestion and graph-write code so we keep the
-same invariant everywhere: graph entities must be canonical, not raw pronouns
-or generic unresolved mentions.
 """
 
 from __future__ import annotations
@@ -18,12 +14,12 @@ _PERSON_PRONOUNS = {
 
 _NEUTRAL_PRONOUNS = {
     "it", "its", "this", "that", "this one", "that one",
-    "nó", "no", "cái này", "cai nay", "cái đó", "cai do",
+    "no", "cai nay", "cai do",
 }
 
 _PLURAL_PRONOUNS = {
     "they", "them", "their", "theirs", "these", "those",
-    "họ", "ho", "bọn họ", "bon ho", "những người này", "nhung nguoi nay",
+    "ho", "bon ho", "nhung nguoi nay",
 }
 
 _GENERIC_REFERENCES = {
@@ -38,11 +34,9 @@ _GENERIC_REFERENCES = {
     "the law", "this law", "that law",
     "the document", "this document", "that document",
     "the company itself", "the latter", "the former",
-    "công ty này", "cong ty nay", "công ty đó", "cong ty do",
-    "bộ phim này", "bo phim nay", "bộ phim đó", "bo phim do",
-    "thiết bị này", "thiet bi nay", "thiết bị đó", "thiet bi do",
-    "sản phẩm này", "san pham nay", "sản phẩm đó", "san pham do",
-    "dịch vụ này", "dich vu nay", "dịch vụ đó", "dich vu do",
+    "cong ty nay", "cong ty do", "bo phim nay", "bo phim do",
+    "thiet bi nay", "thiet bi do", "san pham nay", "san pham do",
+    "dich vu nay", "dich vu do",
 }
 
 PRONOUN_REFERENCES = _PERSON_PRONOUNS | _NEUTRAL_PRONOUNS | _PLURAL_PRONOUNS
@@ -50,7 +44,6 @@ UNRESOLVED_REFERENCES = PRONOUN_REFERENCES | _GENERIC_REFERENCES
 
 
 def normalize_entity_name(value: str) -> str:
-    """Return a normalized entity string suitable for graph storage."""
     if value is None:
         return ""
     text = str(value).strip().lower()
@@ -60,9 +53,7 @@ def normalize_entity_name(value: str) -> str:
 
 
 def is_unresolved_reference(value: str) -> bool:
-    """True when the value looks like a pronoun or generic unresolved mention."""
-    text = normalize_entity_name(value)
-    return text in UNRESOLVED_REFERENCES
+    return normalize_entity_name(value) in UNRESOLVED_REFERENCES
 
 
 def is_plural_reference(value: str) -> bool:
@@ -78,15 +69,10 @@ def is_neutral_reference(value: str) -> bool:
 
 
 def is_person_like_entity(value: str) -> bool:
-    """
-    Lightweight heuristic for person mentions.
-
-    We bias toward multi-token alphabetic names and a few honorific patterns.
-    """
     text = normalize_entity_name(value)
     if not text or is_unresolved_reference(text):
         return False
-    if text.startswith(("mr ", "mrs ", "ms ", "dr ", "prof ", "ông ", "ba ", "co ", "cô ", "anh ")):
+    if text.startswith(("mr ", "mrs ", "ms ", "dr ", "prof ", "ong ", "ba ", "co ", "anh ")):
         return True
     tokens = [token for token in text.split() if token.isalpha()]
     return len(tokens) >= 2

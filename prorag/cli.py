@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 """
-ProRAG CLI
-
-Usage:
-    prorag ingest <file> [--graph graph.json] [--source SOURCE]
-    prorag ask <question> [--graph graph.json]
-    prorag stats [--graph graph.json]
-    prorag interactive [--graph graph.json]
+ProRAG CLI.
 """
 
 import argparse
@@ -17,6 +11,7 @@ import sys
 
 def _load_rag(graph_path: str):
     from prorag import ProRAG
+
     rag = ProRAG()
     if graph_path and os.path.exists(graph_path):
         rag.load(graph_path)
@@ -27,8 +22,8 @@ def _load_rag(graph_path: str):
 def cmd_ingest(args):
     rag = _load_rag(args.graph)
     print(f"[prorag] Ingesting {args.file} ...")
-    n = rag.ingest_file(args.file, source=args.source or args.file)
-    print(f"[prorag] Extracted {n} triples. Stats: {rag.stats()}")
+    count = rag.ingest_file(args.file, source=args.source or args.file)
+    print(f"[prorag] Extracted {count} triples. Stats: {rag.stats()}")
     if args.graph:
         rag.save(args.graph)
         print(f"[prorag] Saved to {args.graph}")
@@ -42,7 +37,7 @@ def cmd_ask(args):
         print(f"Sources: {', '.join(result['sources'])}")
     print(f"Triples used: {result['triples_used']}")
     if result["has_contradictions"]:
-        print("⚠️  Contradicting information found in graph.")
+        print("[warning] Contradicting information found in graph.")
 
 
 def cmd_stats(args):
@@ -55,52 +50,38 @@ def cmd_interactive(args):
     print("[prorag] Interactive mode. Type 'quit' to exit, 'stats' for graph info.\n")
     while True:
         try:
-            q = input("Question: ").strip()
+            question = input("Question: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nBye.")
             break
-        if not q:
+        if not question:
             continue
-        if q.lower() in ("quit", "exit", "q"):
+        if question.lower() in {"quit", "exit", "q"}:
             break
-        if q.lower() == "stats":
+        if question.lower() == "stats":
             print(json.dumps(rag.stats(), indent=2))
             continue
-        result = rag.ask(q)
+        result = rag.ask(question)
         print(f"\n{result['answer']}\n")
         if result["sources"]:
             print(f"Sources: {', '.join(result['sources'])}")
         print()
 
 
-def cmd_serve(args):
-    import uvicorn
-    os.environ["PRORAG_GRAPH_PATH"] = args.graph
-    if hasattr(args, "model") and args.model:
-        os.environ["PRORAG_MODEL_NAME"] = args.model
-    print(f"[prorag] Starting daemon server on {args.host}:{args.port} using graph '{args.graph}'...")
-    uvicorn.run("prorag.server:app", host=args.host, port=args.port, reload=False)
-
-
 def main():
-    parser = argparse.ArgumentParser(prog="prorag", description="ProRAG — Proactive Knowledge Graph RAG")
-    parser.add_argument("--graph", default="graph.json", help="Path to graph file (default: graph.json)")
+    parser = argparse.ArgumentParser(prog="prorag", description="ProRAG entity-graph RAG")
+    parser.add_argument("--graph", default="graph.json", help="Path to graph file")
     sub = parser.add_subparsers(dest="cmd")
 
-    p_ingest = sub.add_parser("ingest", help="Ingest a text file into the graph")
-    p_ingest.add_argument("file", help="Path to text file")
-    p_ingest.add_argument("--source", help="Source label for provenance")
+    ingest_parser = sub.add_parser("ingest", help="Ingest a text file into the graph")
+    ingest_parser.add_argument("file", help="Path to text file")
+    ingest_parser.add_argument("--source", help="Source label for provenance")
 
-    p_ask = sub.add_parser("ask", help="Ask a question")
-    p_ask.add_argument("question", help="Question string")
+    ask_parser = sub.add_parser("ask", help="Ask a question")
+    ask_parser.add_argument("question", help="Question string")
 
     sub.add_parser("stats", help="Show graph statistics")
     sub.add_parser("interactive", help="Interactive Q&A session")
-
-    p_serve = sub.add_parser("serve", help="Start the ProRAG local daemon server")
-    p_serve.add_argument("--host", default="127.0.0.1", help="Host address to bind to (default: 127.0.0.1)")
-    p_serve.add_argument("--port", type=int, default=8000, help="Port to bind to (default: 8000)")
-    p_serve.add_argument("--model", default="llama-3.3-70b-versatile", help="Model name (default: llama-3.3-70b-versatile)")
 
     args = parser.parse_args()
     if args.cmd == "ingest":
@@ -111,8 +92,6 @@ def main():
         cmd_stats(args)
     elif args.cmd == "interactive":
         cmd_interactive(args)
-    elif args.cmd == "serve":
-        cmd_serve(args)
     else:
         parser.print_help()
         sys.exit(1)

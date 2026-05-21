@@ -26,6 +26,7 @@ class EmbeddingStore:
             inst = super().__new__(cls)
             inst._model_name = model_name
             inst._model = None
+            inst._use_fallback = False
             inst._cache: dict[str, np.ndarray] = {}
             cls._instance = inst
         return cls._instance
@@ -33,15 +34,33 @@ class EmbeddingStore:
     # ── model loading ─────────────────────────────────────────────────────────
 
     def _load(self) -> None:
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError as e:
-                raise ImportError(
-                    "sentence-transformers is required for vector retrieval. "
-                    "Install it with: pip install sentence-transformers"
-                ) from e
+        if self._model is not None or self._use_fallback:
+            return
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            self._use_fallback = True
+            return
+        try:
             self._model = SentenceTransformer(self._model_name)
+        except Exception:
+            self._use_fallback = True
+
+    def _fallback_embed(self, text: str) -> np.ndarray:
+        vector = np.zeros(512, dtype=np.float32)
+        normalized = text.lower().strip()
+        tokens = normalized.split()
+        for token in tokens:
+            vector[hash(("tok", token)) % vector.size] += 2.0
+        condensed = normalized.replace(" ", "")
+        for size in (3, 4):
+            for idx in range(max(0, len(condensed) - size + 1)):
+                gram = condensed[idx : idx + size]
+                vector[hash(("gram", gram)) % vector.size] += 1.0
+        norm = np.linalg.norm(vector)
+        if norm == 0:
+            return vector
+        return vector / norm
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -49,7 +68,10 @@ class EmbeddingStore:
         """Return a normalized embedding vector for a text string."""
         if text not in self._cache:
             self._load()
-            vec = self._model.encode(text, normalize_embeddings=True)
+            if self._use_fallback or self._model is None:
+                vec = self._fallback_embed(text)
+            else:
+                vec = self._model.encode(text, normalize_embeddings=True)
             self._cache[text] = vec.astype(np.float32)
         return self._cache[text]
 
@@ -75,9 +97,13 @@ class EmbeddingStore:
         uncached = [c for c in candidates if c not in self._cache]
         if uncached:
             self._load()
-            vecs = self._model.encode(uncached, normalize_embeddings=True, batch_size=64)
-            for text, vec in zip(uncached, vecs):
-                self._cache[text] = vec.astype(np.float32)
+            if self._use_fallback or self._model is None:
+                for text in uncached:
+                    self._cache[text] = self._fallback_embed(text).astype(np.float32)
+            else:
+                vecs = self._model.encode(uncached, normalize_embeddings=True, batch_size=64)
+                for text, vec in zip(uncached, vecs):
+                    self._cache[text] = vec.astype(np.float32)
 
         scores = [
             (c, float(np.dot(q_emb, self._cache[c])))

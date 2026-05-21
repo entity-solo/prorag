@@ -5,15 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prorag"
 version = "0.1.0"
-description = "Proactive Knowledge Graph RAG — continuous learning, no hallucinations, 5x cheaper than GraphRAG"
+description = "Minimal entity-graph RAG for grounded question answering"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 keywords = ["rag", "knowledge-graph", "llm", "ai", "nlp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -23,24 +23,16 @@ dependencies = [
     "groq>=0.9",
     "numpy>=1.26",
     "sentence-transformers>=3.0",
-    "fastapi>=0.110.0",
-    "uvicorn>=0.28.0",
-    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
-openai   = ["openai>=1.0"]
-ollama   = ["requests>=2.31"]
+openai = ["openai>=1.0"]
+ollama = ["requests>=2.31"]
 anthropic = ["anthropic>=0.25"]
-dev      = ["pytest>=8", "pytest-cov", "ruff", "mypy"]
-demo     = ["streamlit>=1.34", "groq>=0.9"]
+dev = ["pytest>=8", "pytest-cov", "ruff", "mypy"]
 
 [project.scripts]
 prorag = "prorag.cli:main"
-
-[project.urls]
-Homepage   = "https://github.com/yourusername/prorag"
-Issues     = "https://github.com/yourusername/prorag/issues"
 
 [tool.ruff]
 line-length = 100
@@ -52,3 +44,4 @@ ignore_missing_imports = true
 
 [tool.setuptools]
 packages = ["prorag"]
+license-files = ["LICENSE"]

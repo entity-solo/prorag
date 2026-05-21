@@ -1,15 +1,16 @@
 """
-Knowledge Graph engine — stores entities, relations, and metadata.
-Handles contradictions explicitly. Supports both keyword BFS and
-vector-guided 2-phase retrieval.
+Knowledge graph storage and retrieval.
 """
 
-import time
-import json
+from __future__ import annotations
+
 import heapq
-import numpy as np
+import json
+import time
+from dataclasses import asdict, dataclass, field
+
 import networkx as nx
-from dataclasses import dataclass, field, asdict
+import numpy as np
 
 from .entity_utils import is_unresolved_reference, normalize_entity_name
 
@@ -19,12 +20,11 @@ class NodeMeta:
     sources: list[str] = field(default_factory=list)
     confidence: float = 1.0
     updated_at: float = field(default_factory=time.time)
-    domains: list[str] = field(default_factory=list)
 
 
 @dataclass
 class EdgeMeta:
-    condition: str = ""           # e.g. "at 1 atm pressure"
+    condition: str = ""
     negated: bool = False
     sources: list[str] = field(default_factory=list)
     confidence: float = 1.0
@@ -32,21 +32,10 @@ class EdgeMeta:
 
 
 class ProRAGGraph:
-    """
-    Proactive entity graph with relation edges and lightweight metadata tags.
+    """Entity graph backed by ``networkx.MultiDiGraph``."""
 
-    Key design decisions:
-    - Nodes carry metadata: source, confidence, optional legacy tags, timestamp
-    - Edges carry conditions and negation flags (handles 'không', 'bị', 'được')
-    - Contradictions are stored explicitly as CONTRADICTS edges — never silently overwritten
-    - Retrieval is entity-first; domain labels remain only as optional compatibility metadata
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.g = nx.MultiDiGraph()
-        self._domain_index: dict[str, set[str]] = {}   # domain -> set of node ids
-
-    # ── ingestion ──────────────────────────────────────────────────────────────
 
     def add_triple(
         self,
@@ -54,69 +43,41 @@ class ProRAGGraph:
         relation: str,
         obj: str,
         *,
-        domains: list[str] | None = None,
         source: str = "",
         condition: str = "",
         negated: bool = False,
         confidence: float = 1.0,
     ) -> None:
-        """Add (subject, relation, object) to the graph."""
-        # Normalize strings and reject unresolved references before graph writes.
-        if subject is None or relation is None or obj is None:
-            return
-        if isinstance(subject, list):
-            subject = ", ".join(str(x) for x in subject)
-        elif not isinstance(subject, str):
-            subject = str(subject)
+        """Add a validated triple to the graph."""
+        subject = self._coerce_text(subject)
+        relation = self._coerce_text(relation).strip().lower()
+        obj = self._coerce_text(obj)
+        condition = str(condition or "").strip()
 
-        if isinstance(relation, list):
-            relation = ", ".join(str(x) for x in relation)
-        elif not isinstance(relation, str):
-            relation = str(relation)
-
-        if isinstance(obj, list):
-            obj = ", ".join(str(x) for x in obj)
-        elif not isinstance(obj, str):
-            obj = str(obj)
-
-        subject = normalize_entity_name(subject)
-        relation = relation.strip().lower()
-        obj = normalize_entity_name(obj)
         if not subject or not relation or not obj:
             return
         if is_unresolved_reference(subject) or is_unresolved_reference(obj):
             return
-        domains = [d.strip().lower() for d in (domains or ["general"]) if d]
-        
+
         now = time.time()
+        self._ensure_node(subject, source=source, confidence=confidence, now=now)
+        self._ensure_node(obj, source=source, confidence=confidence, now=now)
 
-        for node, label in [(subject, subject), (obj, obj)]:
-            if node not in self.g:
-                self.g.add_node(node, meta=NodeMeta(
-                    sources=[source] if source else [],
-                    confidence=confidence,
-                    updated_at=now,
-                    domains=list(domains),
-                ))
-            else:
-                m: NodeMeta = self.g.nodes[node]["meta"]
-                if source and source not in m.sources:
-                    m.sources.append(source)
-                for d in domains:
-                    if d not in m.domains:
-                        m.domains.append(d)
-                m.updated_at = now
-
-        # Check for contradictions before adding
-        existing = self._find_contradicting_edge(subject, relation, obj, negated)
-        if existing:
-            self._add_contradiction_note(subject, relation, obj, existing, source)
+        existing = self._find_existing_edge(subject, relation, obj, negated, condition)
+        if existing is not None:
+            meta = existing["meta"]
+            if source and source not in meta.sources:
+                meta.sources.append(source)
+            meta.confidence = max(meta.confidence, confidence)
+            meta.updated_at = now
             return
 
-        self.g.add_edge(
-            subject, obj,
-            relation=relation,
-            meta=EdgeMeta(
+        contradiction = self._find_contradicting_edge(subject, relation, obj, negated, condition)
+        self._store_edge(
+            subject,
+            obj,
+            relation,
+            EdgeMeta(
                 condition=condition,
                 negated=negated,
                 sources=[source] if source else [],
@@ -124,170 +85,157 @@ class ProRAGGraph:
                 updated_at=now,
             ),
         )
+        if contradiction is not None:
+            self._add_contradiction_note(subject, relation, obj, contradiction, source)
 
-        # Update domain index
-        for d in domains:
-            self._domain_index.setdefault(d, set())
-            self._domain_index[d].add(subject)
-            self._domain_index[d].add(obj)
+    def _store_edge(self, subject: str, obj: str, relation: str, meta: EdgeMeta) -> None:
+        self.g.add_edge(subject, obj, relation=relation, meta=meta)
 
-    def _find_contradicting_edge(self, subject, relation, obj, negated) -> dict | None:
-        """Return existing edge data if it directly contradicts the new triple."""
+    def _coerce_text(self, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            value = ", ".join(str(item) for item in value)
+        return normalize_entity_name(str(value))
+
+    def _ensure_node(self, node: str, *, source: str, confidence: float, now: float) -> None:
+        if node not in self.g:
+            self.g.add_node(
+                node,
+                meta=NodeMeta(
+                    sources=[source] if source else [],
+                    confidence=confidence,
+                    updated_at=now,
+                ),
+            )
+            return
+
+        meta: NodeMeta = self.g.nodes[node]["meta"]
+        if source and source not in meta.sources:
+            meta.sources.append(source)
+        meta.confidence = max(meta.confidence, confidence)
+        meta.updated_at = now
+
+    def _find_existing_edge(
+        self,
+        subject: str,
+        relation: str,
+        obj: str,
+        negated: bool,
+        condition: str,
+    ) -> dict | None:
         for _, tgt, data in self.g.out_edges(subject, data=True):
+            meta: EdgeMeta = data["meta"]
             if (
                 tgt == obj
                 and data.get("relation") == relation
-                and data["meta"].negated != negated
+                and meta.negated == negated
+                and meta.condition == condition
             ):
                 return data
         return None
 
-    def _add_contradiction_note(self, subject, relation, obj, existing_data, new_source):
-        """Mark contradiction — keep both claims, flag for LLM to resolve."""
-        existing_data["meta"].confidence *= 0.7   # lower confidence on contested claim
-        self.g.add_edge(
-            subject, obj,
-            relation=f"CONTRADICTS:{relation}",
-            meta=EdgeMeta(
-                sources=[new_source] if new_source else [],
+    def _find_contradicting_edge(
+        self,
+        subject: str,
+        relation: str,
+        obj: str,
+        negated: bool,
+        condition: str,
+    ) -> dict | None:
+        for _, tgt, data in self.g.out_edges(subject, data=True):
+            meta: EdgeMeta = data["meta"]
+            if (
+                tgt == obj
+                and data.get("relation") == relation
+                and meta.negated != negated
+                and meta.condition == condition
+            ):
+                return data
+        return None
+
+    def _add_contradiction_note(
+        self,
+        subject: str,
+        relation: str,
+        obj: str,
+        existing_data: dict,
+        source: str,
+    ) -> None:
+        existing_data["meta"].confidence *= 0.7
+        self._store_edge(
+            subject,
+            obj,
+            f"CONTRADICTS:{relation}",
+            EdgeMeta(
+                sources=[source] if source else [],
                 confidence=0.5,
                 updated_at=time.time(),
             ),
         )
 
-    # ── querying ───────────────────────────────────────────────────────────────
-
     def query(
         self,
         keywords: list[str],
-        domains: list[str] | None = None,
         max_hops: int = 2,
         top_k: int = 40,
     ) -> list[dict]:
-        """
-        Return relevant triples for a set of keywords.
-        Optional domain scopes are treated as legacy compatibility filters.
-        """
+        """Keyword-seeded graph traversal for fallback retrieval."""
         candidate_nodes: set[str] = set()
-
-        # Seed from keyword matches
-        for kw in keywords:
-            kw_lower = kw.lower()
+        for keyword in keywords:
+            keyword = normalize_entity_name(keyword)
+            if not keyword:
+                continue
             for node in self.g.nodes:
-                if kw_lower in node.lower():
+                if keyword in node:
                     candidate_nodes.add(node)
-
-        # Domain filter (hierarchical prefix matching on index)
-        allowed = set()
-        if domains:
-            for query_d in domains:
-                query_d_lower = query_d.strip().lower()
-                query_d_slash = query_d_lower if query_d_lower.endswith("/") else query_d_lower + "/"
-                for index_d, nodes in self._domain_index.items():
-                    if index_d == query_d_lower or index_d.startswith(query_d_slash):
-                        allowed |= nodes
-            candidate_nodes &= allowed
 
         if not candidate_nodes:
             return []
 
-        # Dijkstra-like BFS traversal with crossing-boundary penalty
-        # Initialize distances for candidate_nodes to 0.0
-        distances = {node: 0.0 for node in candidate_nodes}
-        import heapq
-        queue = [(0.0, node) for node in candidate_nodes]
+        distances = {node: 0 for node in candidate_nodes}
+        queue = [(0, node) for node in candidate_nodes]
         heapq.heapify(queue)
-
-        def get_top_levels(n):
-            meta = self.g.nodes[n].get("meta")
-            if not meta or not meta.domains:
-                return {"general"}
-            return {d.split("/")[0] for d in meta.domains}
 
         while queue:
             dist, node = heapq.heappop(queue)
-            if dist > distances[node]:
-                continue
-            if dist >= max_hops:
+            if dist > distances[node] or dist >= max_hops:
                 continue
 
             neighbors = set(self.g.successors(node)) | set(self.g.predecessors(node))
-            node_top_levels = get_top_levels(node)
             for neighbor in neighbors:
-                neighbor_top_levels = get_top_levels(neighbor)
-                # If query domains are scoped, apply a +1.0 penalty if the neighbor node
-                # does not belong to any of the query's active top-level domains.
-                # Otherwise, check if the current node and neighbor share any top-level domain.
-                if domains:
-                    query_top_levels = {d.split("/")[0] for d in domains}
-                    shares_query = bool(neighbor_top_levels & query_top_levels)
-                    step_cost = 1.0 if shares_query else 2.0
-                else:
-                    shares_top = bool(node_top_levels & neighbor_top_levels)
-                    step_cost = 1.0 if shares_top else 2.0
-
-                new_dist = dist + step_cost
-                if new_dist <= max_hops and (neighbor not in distances or new_dist < distances[neighbor]):
+                new_dist = dist + 1
+                if new_dist <= max_hops and (
+                    neighbor not in distances or new_dist < distances[neighbor]
+                ):
                     distances[neighbor] = new_dist
                     heapq.heappush(queue, (new_dist, neighbor))
-        expanded = set(distances.keys())
 
-        # Helper to compute keyword relevance score
-        def get_relevance(triple):
-            score = 0
-            text = f"{triple['subject']} {triple['relation']} {triple['object']}".lower()
-            for kw in keywords:
-                if kw.lower() in text:
-                    score += 1
-            return score
-
-        # Helper to check if a node matches any query domains (prefix check)
-        def matches_query_domains(n, query_domains):
-            if not query_domains:
-                return True
-            meta = self.g.nodes[n].get("meta")
-            if not meta or not meta.domains:
-                return False
-            for query_d in query_domains:
-                query_d_lower = query_d.strip().lower()
-                query_d_slash = query_d_lower if query_d_lower.endswith("/") else query_d_lower + "/"
-                for d in meta.domains:
-                    if d == query_d_lower or d.startswith(query_d_slash):
-                        return True
-            return False
-
-        # Collect triples
-        triples = []
+        expanded = set(distances)
+        triples: list[dict] = []
         for src in expanded:
             for _, tgt, data in self.g.out_edges(src, data=True):
                 if tgt not in expanded:
                     continue
-                m: EdgeMeta = data["meta"]
-                dist = min(distances.get(src, float(max_hops)), distances.get(tgt, float(max_hops)))
-                
-                # Apply taxonomy match boost: reduce effective distance by 0.5
-                # if either subject or object matches the query domains
-                effective_dist = dist
-                if domains:
-                    src_match = matches_query_domains(src, domains)
-                    tgt_match = matches_query_domains(tgt, domains)
-                    if src_match and tgt_match:
-                        effective_dist -= 0.5
-                
-                triples.append({
-                    "subject": src,
-                    "relation": data["relation"],
-                    "object": tgt,
-                    "negated": m.negated,
-                    "condition": m.condition,
-                    "confidence": m.confidence,
-                    "sources": m.sources,
-                    "distance": dist,
-                    "effective_distance": effective_dist,
-                })
+                meta: EdgeMeta = data["meta"]
+                triples.append(
+                    {
+                        "subject": src,
+                        "relation": data["relation"],
+                        "object": tgt,
+                        "negated": meta.negated,
+                        "condition": meta.condition,
+                        "confidence": meta.confidence,
+                        "sources": meta.sources,
+                        "distance": min(distances.get(src, max_hops), distances.get(tgt, max_hops)),
+                    }
+                )
 
-        # Sort by: 1. Relevance (desc), 2. Effective Distance (asc), 3. Confidence (desc)
-        triples.sort(key=lambda x: (-get_relevance(x), x["effective_distance"], -x["confidence"]))
+        def relevance(triple: dict) -> int:
+            haystack = f"{triple['subject']} {triple['relation']} {triple['object']}"
+            return sum(1 for keyword in keywords if normalize_entity_name(keyword) in haystack)
+
+        triples.sort(key=lambda item: (-relevance(item), item["distance"], -item["confidence"]))
         return triples[:top_k]
 
     def query_vector(
@@ -299,41 +247,24 @@ class ProRAGGraph:
         seed_threshold: float = 0.25,
         alias_threshold: float = 0.85,
     ) -> list[dict]:
-        """
-        2-phase vector retrieval:
-          Phase 1 — Entity matching: embed question, find top-K similar nodes
-                    via cosine similarity → seed nodes.
-          Phase 2 — Relation-guided BFS with semantic cost and on-the-fly alias resolution:
-                    step_cost = 1 - sim(edge_relation_or_neighbor, question)
-                    Total path cost accumulates. BFS stops when cost >= max_cost.
-                    → Relevant edges (cost≈0) allow deep traversal.
-                    → Irrelevant edges (cost≈1) are naturally pruned after 1 hop.
-                    → Similar entities (cosine similarity >= alias_threshold) are linked.
-        """
+        """Semantic graph retrieval with alias bridging."""
         from .embeddings import EmbeddingStore
-        store = EmbeddingStore()
 
+        store = EmbeddingStore()
         all_nodes = list(self.g.nodes)
         if not all_nodes:
             return []
 
-        # ── Phase 1: entity seed selection ───────────────────────────────────
-        q_emb = store.embed(question)
+        question_embedding = store.embed(question)
         top_nodes = store.top_k(question, all_nodes, k=seed_k, threshold=seed_threshold)
-        seeds = {node for node, _ in top_nodes}
+        seeds = {node for node, _ in top_nodes} or set(all_nodes[:seed_k])
 
-        if not seeds:
-            # fallback: use all nodes as seeds (small graph)
-            seeds = set(all_nodes[:seed_k])
-
-        # ── Pre-normalize all node embeddings for alias matching ──────────────
-        node_embs = None
+        node_embeddings = None
         if alias_threshold > 0.0 and len(all_nodes) > 1:
-            embs = np.array([store.embed(n) for n in all_nodes])
-            norms = np.linalg.norm(embs, axis=1, keepdims=True)
-            node_embs = embs / np.maximum(norms, 1e-9)
+            embeddings = np.array([store.embed(node) for node in all_nodes])
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            node_embeddings = embeddings / np.maximum(norms, 1e-9)
 
-        # ── Phase 2: relation-guided BFS ──────────────────────────────────────
         distances: dict[str, float] = {node: 0.0 for node in seeds}
         queue = [(0.0, node) for node in seeds]
         heapq.heapify(queue)
@@ -343,26 +274,17 @@ class ProRAGGraph:
             if dist > distances[node] or dist >= max_cost:
                 continue
 
-            # Traverse both outgoing and incoming edges (bidirectional)
             edges: list[tuple[str, dict]] = []
-            for _, nbr, data in self.g.out_edges(node, data=True):
-                edges.append((nbr, data))
+            for _, neighbor, data in self.g.out_edges(node, data=True):
+                edges.append((neighbor, data))
             for pred, _, data in self.g.in_edges(node, data=True):
                 edges.append((pred, data))
 
             for neighbor, data in edges:
                 relation = data.get("relation", "")
-
-                # Semantic similarity of this edge's relation to the question
-                rel_sim = float(np.dot(q_emb, store.embed(relation)))
-                # Semantic similarity of the neighbor entity to the question
-                ent_sim = float(np.dot(q_emb, store.embed(neighbor)))
-
-                # Use the better of the two scores as the signal
-                best_sim = max(rel_sim, ent_sim)
-                # step cost: 0.0 (perfect match) → 1.0 (no match)
-                step_cost = 1.0 - max(0.0, best_sim)
-
+                relation_similarity = float(np.dot(question_embedding, store.embed(relation)))
+                entity_similarity = float(np.dot(question_embedding, store.embed(neighbor)))
+                step_cost = 1.0 - max(0.0, relation_similarity, entity_similarity)
                 new_dist = dist + step_cost
                 if new_dist < max_cost and (
                     neighbor not in distances or new_dist < distances[neighbor]
@@ -370,91 +292,76 @@ class ProRAGGraph:
                     distances[neighbor] = new_dist
                     heapq.heappush(queue, (new_dist, neighbor))
 
-            # Traverse virtual alias edges
-            if alias_threshold > 0.0 and node_embs is not None:
-                node_emb = store.embed(node)
-                node_emb_norm = node_emb / max(np.linalg.norm(node_emb), 1e-9)
-                sims = np.dot(node_embs, node_emb_norm)
-                for idx, sim in enumerate(sims):
+            if alias_threshold > 0.0 and node_embeddings is not None:
+                node_embedding = store.embed(node)
+                normalized = node_embedding / max(np.linalg.norm(node_embedding), 1e-9)
+                similarities = np.dot(node_embeddings, normalized)
+                for idx, similarity in enumerate(similarities):
                     alias_node = all_nodes[idx]
-                    if alias_node == node:
+                    if alias_node == node or similarity < alias_threshold:
                         continue
-                    if sim >= alias_threshold:
-                        step_cost = 1.0 - max(0.0, float(sim))
-                        new_dist = dist + step_cost
-                        if new_dist < max_cost and (
-                            alias_node not in distances or new_dist < distances[alias_node]
-                        ):
-                            distances[alias_node] = new_dist
-                            heapq.heappush(queue, (new_dist, alias_node))
+                    new_dist = dist + (1.0 - max(0.0, float(similarity)))
+                    if new_dist < max_cost and (
+                        alias_node not in distances or new_dist < distances[alias_node]
+                    ):
+                        distances[alias_node] = new_dist
+                        heapq.heappush(queue, (new_dist, alias_node))
 
-        expanded = set(distances.keys())
-
-        # ── Collect & rank triples ────────────────────────────────────────────
-        triples = []
+        expanded = set(distances)
+        triples: list[dict] = []
         for src in expanded:
             for _, tgt, data in self.g.out_edges(src, data=True):
                 if tgt not in expanded:
                     continue
-                m: EdgeMeta = data["meta"]
-                dist = min(
-                    distances.get(src, max_cost),
-                    distances.get(tgt, max_cost),
-                )
-                # Score the whole triple string against the question
+                meta: EdgeMeta = data["meta"]
                 triple_text = f"{src} {data['relation']} {tgt}"
-                triple_sim = float(np.dot(q_emb, store.embed(triple_text)))
+                triples.append(
+                    {
+                        "subject": src,
+                        "relation": data["relation"],
+                        "object": tgt,
+                        "negated": meta.negated,
+                        "condition": meta.condition,
+                        "confidence": meta.confidence,
+                        "sources": meta.sources,
+                        "distance": min(distances.get(src, max_cost), distances.get(tgt, max_cost)),
+                        "similarity": float(np.dot(question_embedding, store.embed(triple_text))),
+                    }
+                )
 
-                triples.append({
-                    "subject": src,
-                    "relation": data["relation"],
-                    "object": tgt,
-                    "negated": m.negated,
-                    "condition": m.condition,
-                    "confidence": m.confidence,
-                    "sources": m.sources,
-                    "distance": dist,
-                    "similarity": triple_sim,
-                })
-
-        # Sort: similarity desc → distance asc → confidence desc
-        triples.sort(key=lambda x: (-x["similarity"], x["distance"], -x["confidence"]))
+        triples.sort(key=lambda item: (-item["similarity"], item["distance"], -item["confidence"]))
         return triples[:top_k]
-
-    def get_domains(self) -> list[str]:
-        return list(self._domain_index.keys())
 
     def stats(self) -> dict:
         return {
             "nodes": self.g.number_of_nodes(),
             "edges": self.g.number_of_edges(),
-            "domains": list(self._domain_index.keys()),
         }
-
-    # ── persistence ────────────────────────────────────────────────────────────
 
     def save(self, path: str) -> None:
         data = nx.node_link_data(self.g)
-        # NodeMeta / EdgeMeta are dataclasses — serialize manually
         edge_key = "links" if "links" in data else "edges"
         for node in data["nodes"]:
             if "meta" in node:
                 node["meta"] = asdict(node["meta"])
-        for link in data[edge_key]:
-            if "meta" in link:
-                link["meta"] = asdict(link["meta"])
-        with open(path, "w") as f:
-            json.dump({"graph": data, "domain_index": {k: list(v) for k, v in self._domain_index.items()}}, f)
+        for edge in data[edge_key]:
+            if "meta" in edge:
+                edge["meta"] = asdict(edge["meta"])
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"graph": data}, handle, ensure_ascii=False)
 
     def load(self, path: str) -> None:
-        with open(path) as f:
-            raw = json.load(f)
-        edge_key = "links" if "links" in raw["graph"] else "edges"
-        for node in raw["graph"]["nodes"]:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        graph_data = raw["graph"] if isinstance(raw, dict) and "graph" in raw else raw
+        edge_key = "links" if "links" in graph_data else "edges"
+        for node in graph_data["nodes"]:
             if "meta" in node:
-                node["meta"] = NodeMeta(**node["meta"])
-        for link in raw["graph"][edge_key]:
-            if "meta" in link:
-                link["meta"] = EdgeMeta(**link["meta"])
-        self.g = nx.node_link_graph(raw["graph"])
-        self._domain_index = {k: set(v) for k, v in raw["domain_index"].items()}
+                meta = node["meta"]
+                if "domains" in meta:
+                    meta.pop("domains", None)
+                node["meta"] = NodeMeta(**meta)
+        for edge in graph_data[edge_key]:
+            if "meta" in edge:
+                edge["meta"] = EdgeMeta(**edge["meta"])
+        self.g = nx.node_link_graph(graph_data)
