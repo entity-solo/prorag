@@ -126,6 +126,9 @@ except ImportError:
 
 
 def cached_extract_triples(text, source="", llm_model="llama3-70b-8192", extra_domains=None):
+    if MOCK_MODE:
+        return original_extract_triples(text, source=source, llm_model=llm_model, extra_domains=extra_domains)
+
     text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
     
     # If in cache, return the cached result

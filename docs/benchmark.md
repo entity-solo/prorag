@@ -65,6 +65,19 @@ GROQ_API_KEY=your_key python scripts/run_benchmark.py --dataset hotpotqa --n 100
 
 > Note: These numbers are from an internal evaluation. Independent reproduction is encouraged and appreciated — please open an issue with your results.
 
+## Reproduction Results (v0.1, n=5)
+
+These results were run locally using `llama-3.3-70b-versatile` on Groq.
+
+| Metric | Naive RAG | **ProRAG** |
+|---|---|---|
+| Accuracy (F1) | 0.3593 | 0.2607 |
+| Exact Match (EM) | 0.2000 | 0.0000 |
+| Latency (Avg) | 2.23s | 15.04s (ingest included) |
+| LLM calls/query | 1.0 | 6.2 (ingest included) |
+| Estimated Tokens/query | 154 | 2009 (ingest included) |
+
+
 ## Known limitations
 
 - Benchmark corpus is English-only for now; Vietnamese results pending
