@@ -1,3 +1,10 @@
+"""
+Legacy demo script kept for historical comparison experiments.
+
+It monkey-patches older retrieval behavior and does not reflect the current
+entity-first retrieval pipeline used by `ProRAG.ask()`.
+"""
+
 import os
 import time
 import re
@@ -14,7 +21,7 @@ MODEL = "llama-3.3-70b-versatile"
 # Override warning emoji to prevent CP1252 encoding crash on Windows
 prorag.pipeline._CONTRADICTIONS_NOTE = "\n[Warning] Note: conflicting information exists - see sources."
 
-# Monkey patch ProRAGGraph.query to use max_hops=4 by default
+# Legacy monkey patch for the older keyword/BFS retrieval path.
 original_query = ProRAGGraph.query
 def patched_query(self, keywords, domains=None, max_hops=4, top_k=40):
     return original_query(self, keywords, domains=domains, max_hops=max_hops, top_k=top_k)

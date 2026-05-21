@@ -1,5 +1,7 @@
 # Benchmark Methodology
 
+> Note: some benchmark scripts in this repository were written before the current mention-level ingest and path-level retrieval pipeline. Treat this document as benchmark context, not the source of truth for runtime architecture. The source of truth is the code plus [`docs/architecture.md`](./architecture.md).
+
 ## Setup
 
 Benchmarks compare ProRAG against:

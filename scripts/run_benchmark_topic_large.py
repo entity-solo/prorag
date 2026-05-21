@@ -1,3 +1,10 @@
+"""
+Historical large-topic benchmark kept for comparison runs.
+
+It monkey-patches retrieval behavior and should not be treated as the source
+of truth for the current entity-first runtime pipeline.
+"""
+
 import os
 import json
 import time
@@ -288,9 +295,6 @@ def main():
     # We also override warning emoji to keep stdout clean
     import prorag.pipeline as pr_pipeline
     pr_pipeline._CONTRADICTIONS_NOTE = "\n[Warning] Note: conflicting information exists - see sources."
-    # Bypass domain detector to double query speed and eliminate filter mismatch
-    pr_pipeline.detect_domains = lambda question, llm_model=None: None
-
     start_prorag_ingest = time.time()
     for doc in CORPUS:
         print(f"  Ingesting {doc['source']}...")

@@ -30,11 +30,16 @@ class ProRAG:
         self.model = model
 
     def ingest(self, text: str, source: str = "", domains: list[str] | None = None) -> int:
-        """Add raw text to the knowledge graph. Returns number of triples extracted."""
+        """
+        Add raw text to the knowledge graph.
+
+        The optional `domains` argument is kept only for backward compatibility.
+        The current runtime architecture is entity-graph driven.
+        """
         return ingest_text(text, self.graph, source=source, llm_model=self.model, extra_domains=domains)
 
     def ingest_file(self, path: str, source: str | None = None) -> int:
-        """Ingest a plain-text file. Returns number of triples extracted."""
+        """Ingest a plain-text file. Returns number of validated graph triples."""
         return ingest_file(path, self.graph, source=source, llm_model=self.model)
 
     def ask(self, question: str) -> dict:

@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional
+from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,7 +7,7 @@ from prorag import ProRAG
 
 app = FastAPI(
     title="ProRAG Daemon (Open-Source Edition)",
-    description="FastAPI server for local-first single-user GraphRAG (Ollama-style)",
+    description="FastAPI server for local-first single-user entity-graph RAG",
     version="0.2.0"
 )
 
@@ -49,7 +49,6 @@ def save_graph() -> None:
 class IngestTextRequest(BaseModel):
     text: str
     source: Optional[str] = None
-    domains: Optional[List[str]] = None
 
 
 class AskRequest(BaseModel):
@@ -74,7 +73,7 @@ def read_root():
 def ingest_text_endpoint(req: IngestTextRequest):
     """Ingest raw text directly into the local graph."""
     try:
-        n = rag_instance.ingest(req.text, source=req.source or "", domains=req.domains)
+        n = rag_instance.ingest(req.text, source=req.source or "")
         save_graph()
         return {"status": "success", "triples_added": n}
     except Exception as e:

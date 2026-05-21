@@ -33,13 +33,13 @@ class EdgeMeta:
 
 class ProRAGGraph:
     """
-    Proactive, domain-partitioned knowledge graph.
+    Proactive entity graph with relation edges and lightweight metadata tags.
 
     Key design decisions:
-    - Nodes carry metadata: source, confidence, domain labels, timestamp
+    - Nodes carry metadata: source, confidence, optional legacy tags, timestamp
     - Edges carry conditions and negation flags (handles 'không', 'bị', 'được')
     - Contradictions are stored explicitly as CONTRADICTS edges — never silently overwritten
-    - Each domain is a subgraph view; querying is scoped to relevant domains
+    - Retrieval is entity-first; domain labels remain only as optional compatibility metadata
     """
 
     def __init__(self):
@@ -166,7 +166,7 @@ class ProRAGGraph:
     ) -> list[dict]:
         """
         Return relevant triples for a set of keywords.
-        Scoped to domain subgraph when domains provided.
+        Optional domain scopes are treated as legacy compatibility filters.
         """
         candidate_nodes: set[str] = set()
 

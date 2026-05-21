@@ -51,7 +51,7 @@ def main():
         result = rag.ask(q)
         print(f"Q: {q}")
         print(f"A: {result['answer']}")
-        print(f"   domains={result['domains']} | triples_used={result['triples_used']} | sources={result['sources']}")
+        print(f"   triples_used={result['triples_used']} | sources={result['sources']}")
         if result["has_contradictions"]:
             print("   ⚠️  Contradicting info in graph")
         print()

@@ -1,3 +1,10 @@
+"""
+Historical topic benchmark kept for side-by-side comparisons.
+
+It contains mock paths and legacy assumptions that are not representative of
+the default runtime retrieval pipeline.
+"""
+
 import os
 import json
 import time

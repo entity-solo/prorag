@@ -1,3 +1,10 @@
+"""
+Historical benchmark harness kept for reproducibility experiments.
+
+This script patches internals for benchmarking and is not the source of truth
+for the current runtime architecture.
+"""
+
 import os
 import json
 import time

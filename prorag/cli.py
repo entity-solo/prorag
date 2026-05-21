@@ -40,7 +40,7 @@ def cmd_ask(args):
     print(f"\n{result['answer']}\n")
     if result["sources"]:
         print(f"Sources: {', '.join(result['sources'])}")
-    print(f"Domains: {', '.join(result['domains'])} | Triples used: {result['triples_used']}")
+    print(f"Triples used: {result['triples_used']}")
     if result["has_contradictions"]:
         print("⚠️  Contradicting information found in graph.")
 

@@ -109,12 +109,12 @@ def answer(
         {
           "answer": str,
           "sources": list[str],
-          "domains": list[str],
+          "domains": list[str],  # legacy compatibility metadata
           "triples_used": int,
           "has_contradictions": bool,
         }
     """
-    domains = ["general"]
+    legacy_domains = ["general"]
 
     triples, _retrieval = retrieve_evidence(
         question,
@@ -127,7 +127,7 @@ def answer(
         return {
             "answer": "I don't have enough information to answer this.",
             "sources": [],
-            "domains": domains,
+            "domains": legacy_domains,
             "triples_used": 0,
             "has_contradictions": False,
         }
@@ -140,7 +140,7 @@ def answer(
     return {
         "answer": answer_text.strip(),
         "sources": sorted(set(sources)),
-        "domains": domains,
+        "domains": legacy_domains,
         "triples_used": len(triples),
         "has_contradictions": has_contradictions,
     }
