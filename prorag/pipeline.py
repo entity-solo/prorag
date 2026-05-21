@@ -12,7 +12,7 @@ Flow:
 """
 
 from .graph import ProRAGGraph
-from .detector import detect_domains, _keywords_from_question
+from .detector import _keywords_from_question
 from .llm import call_llm
 
 _ANSWER_PROMPT = """\
@@ -57,11 +57,21 @@ def answer(
     # 1 — detect domains (bypassed, return general for backward compatibility)
     domains = ["general"]
 
-    # 2 — extract keywords from the question
+    # 2 — extract keywords (used as fallback)
     keywords = _keywords_from_question(question)
 
-    # 3 — query flat graph (bypassing domain filtering)
-    triples = graph.query(keywords, domains=None, top_k=max_context_triples)
+    # 3 — 2-phase vector retrieval (entity cosine seed + relation-guided BFS)
+    try:
+        triples = graph.query_vector(
+            question,
+            max_hops=3,
+            top_k=max_context_triples,
+            seed_k=10,
+            seed_threshold=0.25,
+        )
+    except ImportError:
+        # sentence-transformers not installed — fall back to keyword BFS
+        triples = graph.query(keywords, domains=None, top_k=max_context_triples)
 
     # 4 — format context
     context, sources, has_contradictions = _format_context(triples)

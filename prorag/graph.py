@@ -1,10 +1,13 @@
 """
 Knowledge Graph engine — stores entities, relations, and metadata.
-Partitioned by domain. Handles contradictions explicitly.
+Handles contradictions explicitly. Supports both keyword BFS and
+vector-guided 2-phase retrieval.
 """
 
 import time
 import json
+import heapq
+import numpy as np
 import networkx as nx
 from dataclasses import dataclass, field, asdict
 
@@ -281,6 +284,108 @@ class ProRAGGraph:
 
         # Sort by: 1. Relevance (desc), 2. Effective Distance (asc), 3. Confidence (desc)
         triples.sort(key=lambda x: (-get_relevance(x), x["effective_distance"], -x["confidence"]))
+        return triples[:top_k]
+
+    def query_vector(
+        self,
+        question: str,
+        max_hops: int = 3,
+        top_k: int = 60,
+        seed_k: int = 10,
+        seed_threshold: float = 0.25,
+    ) -> list[dict]:
+        """
+        2-phase vector retrieval:
+          Phase 1 — Entity matching: embed question, find top-K similar nodes
+                    via cosine similarity → seed nodes.
+          Phase 2 — Relation-guided BFS: edge step cost = 1 - sim(edge_relation, question)
+                    → edges semantically close to the question get low cost
+                    → naturally "lights up" the relevant path.
+        """
+        from .embeddings import EmbeddingStore
+        store = EmbeddingStore()
+
+        all_nodes = list(self.g.nodes)
+        if not all_nodes:
+            return []
+
+        # ── Phase 1: entity seed selection ───────────────────────────────────
+        q_emb = store.embed(question)
+        top_nodes = store.top_k(question, all_nodes, k=seed_k, threshold=seed_threshold)
+        seeds = {node for node, _ in top_nodes}
+
+        if not seeds:
+            # fallback: use all nodes as seeds (small graph)
+            seeds = set(all_nodes[:seed_k])
+
+        # ── Phase 2: relation-guided BFS ──────────────────────────────────────
+        distances: dict[str, float] = {node: 0.0 for node in seeds}
+        queue = [(0.0, node) for node in seeds]
+        heapq.heapify(queue)
+
+        while queue:
+            dist, node = heapq.heappop(queue)
+            if dist > distances[node] or dist >= max_hops:
+                continue
+
+            # Traverse both outgoing and incoming edges (bidirectional)
+            edges: list[tuple[str, dict]] = []
+            for _, nbr, data in self.g.out_edges(node, data=True):
+                edges.append((nbr, data))
+            for pred, _, data in self.g.in_edges(node, data=True):
+                edges.append((pred, data))
+
+            for neighbor, data in edges:
+                relation = data.get("relation", "")
+
+                # Semantic similarity of this edge's relation to the question
+                rel_sim = float(np.dot(q_emb, store.embed(relation)))
+                # Semantic similarity of the neighbor entity to the question
+                ent_sim = float(np.dot(q_emb, store.embed(neighbor)))
+
+                # Use the better of the two scores as the signal
+                best_sim = max(rel_sim, ent_sim)
+                # step cost: 0.0 (perfect match) → 1.0 (no match)
+                step_cost = 1.0 - max(0.0, best_sim)
+
+                new_dist = dist + step_cost
+                if new_dist <= max_hops and (
+                    neighbor not in distances or new_dist < distances[neighbor]
+                ):
+                    distances[neighbor] = new_dist
+                    heapq.heappush(queue, (new_dist, neighbor))
+
+        expanded = set(distances.keys())
+
+        # ── Collect & rank triples ────────────────────────────────────────────
+        triples = []
+        for src in expanded:
+            for _, tgt, data in self.g.out_edges(src, data=True):
+                if tgt not in expanded:
+                    continue
+                m: EdgeMeta = data["meta"]
+                dist = min(
+                    distances.get(src, float(max_hops)),
+                    distances.get(tgt, float(max_hops)),
+                )
+                # Score the whole triple string against the question
+                triple_text = f"{src} {data['relation']} {tgt}"
+                triple_sim = float(np.dot(q_emb, store.embed(triple_text)))
+
+                triples.append({
+                    "subject": src,
+                    "relation": data["relation"],
+                    "object": tgt,
+                    "negated": m.negated,
+                    "condition": m.condition,
+                    "confidence": m.confidence,
+                    "sources": m.sources,
+                    "distance": dist,
+                    "similarity": triple_sim,
+                })
+
+        # Sort: similarity desc → distance asc → confidence desc
+        triples.sort(key=lambda x: (-x["similarity"], x["distance"], -x["confidence"]))
         return triples[:top_k]
 
     def get_domains(self) -> list[str]:
