@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "prorag"
+version = "0.1.0"
+description = "Proactive Knowledge Graph RAG — continuous learning, no hallucinations, 5x cheaper than GraphRAG"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = ["rag", "knowledge-graph", "llm", "ai", "nlp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "networkx>=3.2",
+    "groq>=0.9",
+]
+
+[project.optional-dependencies]
+openai   = ["openai>=1.0"]
+ollama   = ["requests>=2.31"]
+anthropic = ["anthropic>=0.25"]
+dev      = ["pytest>=8", "pytest-cov", "ruff", "mypy"]
+demo     = ["streamlit>=1.34", "groq>=0.9"]
+
+[project.scripts]
+prorag = "prorag.cli:main"
+
+[project.urls]
+Homepage   = "https://github.com/yourusername/prorag"
+Issues     = "https://github.com/yourusername/prorag/issues"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
