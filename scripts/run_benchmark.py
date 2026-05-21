@@ -5,6 +5,7 @@ import argparse
 import hashlib
 from datetime import datetime
 import re
+import threading
 
 # Import ProRAG components
 from prorag import ProRAG
@@ -19,12 +20,14 @@ LLM_OUTPUT_CHARS = 0
 MOCK_MODE = False
 
 original_call_llm = prorag.llm.call_llm
+COUNTER_LOCK = threading.Lock()
 
 
 def intercepted_call_llm(prompt, model="llama-3.3-70b-versatile", max_tokens=1024, system=""):
     global LLM_CALL_COUNT, LLM_INPUT_CHARS, LLM_OUTPUT_CHARS
-    LLM_CALL_COUNT += 1
-    LLM_INPUT_CHARS += len(prompt) + len(system)
+    with COUNTER_LOCK:
+        LLM_CALL_COUNT += 1
+        LLM_INPUT_CHARS += len(prompt) + len(system)
     
     if MOCK_MODE:
         # Mock responses to run without API keys
@@ -68,7 +71,8 @@ def intercepted_call_llm(prompt, model="llama-3.3-70b-versatile", max_tokens=102
         # Run the original function
         response = original_call_llm(prompt, model=model, max_tokens=max_tokens, system=system)
     
-    LLM_OUTPUT_CHARS += len(response)
+    with COUNTER_LOCK:
+        LLM_OUTPUT_CHARS += len(response)
     return response
 
 
@@ -125,6 +129,8 @@ except ImportError:
     pass
 
 
+CACHE_LOCK = threading.Lock()
+
 def cached_extract_triples(text, source="", llm_model="llama-3.3-70b-versatile", extra_domains=None):
     if MOCK_MODE:
         return original_extract_triples(text, source=source, llm_model=llm_model, extra_domains=extra_domains)
@@ -132,10 +138,14 @@ def cached_extract_triples(text, source="", llm_model="llama-3.3-70b-versatile",
     text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
     
     # If in cache, return the cached result
-    if text_hash in TRIPLE_CACHE:
-        # Create a deep copy of cached results to avoid side-effects
-        triples = json.loads(json.dumps(TRIPLE_CACHE[text_hash]))
-        
+    with CACHE_LOCK:
+        has_cache = text_hash in TRIPLE_CACHE
+        if has_cache:
+            triples = json.loads(json.dumps(TRIPLE_CACHE[text_hash]))
+        else:
+            triples = None
+
+    if triples is not None:
         # Apply source & domains formatting like the original function does
         if extra_domains:
             for t in triples:
@@ -149,13 +159,22 @@ def cached_extract_triples(text, source="", llm_model="llama-3.3-70b-versatile",
 
     # Otherwise call the original extractor LLM and cache the result
     triples = original_extract_triples(text, source=source, llm_model=llm_model, extra_domains=extra_domains)
-    
+
     # Store in cache (clean version without runtime source/extra_domains side-effects)
-    # We do a fresh extraction pass with no extra formatting to store raw results
-    raw_triples = original_extract_triples(text, source="", llm_model=llm_model, extra_domains=None)
-    TRIPLE_CACHE[text_hash] = raw_triples
-    save_triple_cache()
-    
+    # Construct in Python to avoid a second redundant LLM call
+    raw_triples = []
+    for t in triples:
+        t_clean = t.copy()
+        if "source" in t_clean:
+            del t_clean["source"]
+        if extra_domains:
+            t_clean["domains"] = [d for d in t_clean.get("domains", []) if d not in extra_domains]
+        raw_triples.append(t_clean)
+
+    with CACHE_LOCK:
+        TRIPLE_CACHE[text_hash] = raw_triples
+        save_triple_cache()
+
     return triples
 
 
@@ -207,8 +226,12 @@ class NaiveRAG:
         # 2. Query LLM
         prompt = f"""You are a precise question-answering assistant.
 Answer the question using ONLY the context below.
-If the context does not contain enough information, say "I don't have enough information to answer this."
-Never make up facts not present in the context.
+
+Rules for your answer:
+1. Provide a highly concise, short-phrase answer (e.g. only the name, date, or "yes"/"no").
+2. Do NOT write full sentences or conversational responses.
+3. If the context does not contain enough information, say "I don't have enough information to answer this."
+4. Never make up facts not present in the context.
 
 ## Context
 {context}
@@ -270,6 +293,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="data/hotpot_dev_distractor_v1.json", help="Path to HotpotQA dataset")
     parser.add_argument("--n", type=int, default=5, help="Number of questions to evaluate")
     parser.add_argument("--model", type=str, default="llama-3.3-70b-versatile", help="LLM Model to use")
+    parser.add_argument("--extractor-model", type=str, default="llama-3.3-70b-versatile", help="LLM Model to use for ProRAG ingestion/triple extraction")
     parser.add_argument("--mock", action="store_true", help="Run in offline mock mode without API keys")
     args = parser.parse_args()
 
@@ -346,9 +370,34 @@ def main():
         # Ingest contexts
         reset_llm_counters()
         ingest_start = time.time()
-        for title, sentences in context_data:
+        
+        from concurrent.futures import ThreadPoolExecutor
+        
+        def extract_para(title_and_sentences):
+            title, sentences = title_and_sentences
             paragraph = " ".join(sentences)
-            prorag_instance.ingest(paragraph, source=title)
+            import prorag.extractor
+            triples = prorag.extractor.extract_triples(paragraph, source=title, llm_model=args.extractor_model)
+            return title, triples
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            extracted_results = list(executor.map(extract_para, context_data))
+            
+        for title, triples in extracted_results:
+            for t in triples:
+                try:
+                    prorag_instance.graph.add_triple(
+                        subject=t["subject"],
+                        relation=t["relation"],
+                        obj=t["object"],
+                        domains=t.get("domains", ["general"]),
+                        source=t.get("source", title),
+                        condition=t.get("condition", ""),
+                        negated=t.get("negated", False),
+                        confidence=float(t.get("confidence", 1.0)),
+                    )
+                except (KeyError, TypeError):
+                    continue
         
         ingest_latency = time.time() - ingest_start
         ingest_calls = LLM_CALL_COUNT

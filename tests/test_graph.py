@@ -156,8 +156,8 @@ def test_nested_fact_extraction_mocked():
     # Test that extract_triples correctly calls the LLM and parses the expected nested/implicit JSON response.
     mock_response = """
     [
-      {"subject": "tim cook", "relation": "là ceo của", "object": "apple", "negated": false, "confidence": 1.0, "structural_tags": ["general"]},
-      {"subject": "tim cook", "relation": "cho ra mắt", "object": "iphone 17", "negated": false, "confidence": 1.0, "structural_tags": ["general"]}
+      {"subject": "tim cook", "relation": "là ceo của", "object": "apple", "negated": false, "confidence": 1.0},
+      {"subject": "tim cook", "relation": "cho ra mắt", "object": "iphone 17", "negated": false, "confidence": 1.0}
     ]
     """
     with patch("prorag.extractor.call_llm", return_value=mock_response) as mock_call:

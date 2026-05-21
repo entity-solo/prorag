@@ -5,7 +5,7 @@ import sys
 
 DATA_DIR = "data"
 RESULTS_DIR = "results"
-HOTPOT_URL = "http://curation.s3.amazonaws.com/hotpotqa/hotpot_dev_distractor_v1.json"
+HOTPOT_URL = "https://huggingface.co/datasets/namlh2004/hotpotqa/resolve/main/hotpot_dev_distractor_v1.json"
 FILE_PATH = os.path.join(DATA_DIR, "hotpot_dev_distractor_v1.json")
 
 # 5 real-world QA samples as fallback in case CMU/S3 download fails

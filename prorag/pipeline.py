@@ -18,8 +18,12 @@ from .llm import call_llm
 _ANSWER_PROMPT = """\
 You are a precise question-answering assistant.
 Answer the question using ONLY the knowledge graph context below.
-If the context does not contain enough information, say "I don't have enough information to answer this."
-Never make up facts not present in the context.
+
+Rules for your answer:
+1. Provide a highly concise, short-phrase answer (e.g. only the name, date, or "yes"/"no").
+2. Do NOT write full sentences or conversational responses.
+3. If the context does not contain enough information, say "I don't have enough information to answer this."
+4. Never make up facts not present in the context.
 
 ## Knowledge Graph Context
 {context}
@@ -50,18 +54,14 @@ def answer(
           "has_contradictions": bool,
         }
     """
-    # 1 — detect domains
-    domains = detect_domains(question, graph=graph, llm_model=llm_model)
+    # 1 — detect domains (bypassed, return general for backward compatibility)
+    domains = ["general"]
 
     # 2 — extract keywords from the question
     keywords = _keywords_from_question(question)
 
-    # 3 — query scoped subgraph
-    triples = graph.query(keywords, domains=domains, top_k=max_context_triples)
-
-    # Also try without domain filter if result is sparse
-    if len(triples) < 15:
-        triples = graph.query(keywords, domains=None, top_k=max_context_triples)
+    # 3 — query flat graph (bypassing domain filtering)
+    triples = graph.query(keywords, domains=None, top_k=max_context_triples)
 
     # 4 — format context
     context, sources, has_contradictions = _format_context(triples)

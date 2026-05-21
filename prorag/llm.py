@@ -37,6 +37,7 @@ def _groq(prompt, model, max_tokens, system) -> str:
         from groq import Groq
     except ImportError:
         raise ImportError("pip install groq")
+    import time
 
     api_key = os.environ.get("GROQ_API_KEY") or _missing("GROQ_API_KEY")
     client = Groq(api_key=api_key)
@@ -44,8 +45,22 @@ def _groq(prompt, model, max_tokens, system) -> str:
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    resp = client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
-    return resp.choices[0].message.content or ""
+
+    max_retries = 8
+    for attempt in range(max_retries):
+        try:
+            resp = client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "rate limit" in err_str or "limit_reached" in err_str or "tp_limit_reached" in err_str or "rate_limit_exceeded" in err_str:
+                wait_time = (2 ** attempt) * 2
+                print(f"[Rate Limit] Groq rate limit hit. Waiting {wait_time}s before retry... (Error: {e})")
+                time.sleep(wait_time)
+            else:
+                raise e
+
+    raise RuntimeError("Failed to call Groq API after maximum retries due to rate limits.")
 
 
 def _openai(prompt, model, max_tokens, system) -> str:

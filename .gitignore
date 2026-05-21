@@ -6,8 +6,6 @@ dist/
 build/
 .env
 .env.*
-*.json
-!pyproject.toml
 .venv/
 venv/
 .pytest_cache/
@@ -17,3 +15,15 @@ venv/
 MANIFEST
 htmlcov/
 .coverage
+
+# Generated / temporary files
+scratch/
+data/graphs/
+data/*.db
+data/*.bak
+data/hotpot_*.json
+results/
+
+# JSON files (except pyproject.toml related)
+*.json
+!pyproject.toml

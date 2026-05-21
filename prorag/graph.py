@@ -57,10 +57,29 @@ class ProRAGGraph:
     ) -> None:
         """Add (subject, relation, object) to the graph."""
         # Normalize strings to strip whitespaces and use lowercase
+        if subject is None or relation is None or obj is None:
+            return
+        if isinstance(subject, list):
+            subject = ", ".join(str(x) for x in subject)
+        elif not isinstance(subject, str):
+            subject = str(subject)
+
+        if isinstance(relation, list):
+            relation = ", ".join(str(x) for x in relation)
+        elif not isinstance(relation, str):
+            relation = str(relation)
+
+        if isinstance(obj, list):
+            obj = ", ".join(str(x) for x in obj)
+        elif not isinstance(obj, str):
+            obj = str(obj)
+
         subject = subject.strip().lower()
         relation = relation.strip().lower()
         obj = obj.strip().lower()
-        domains = [d.strip().lower() for d in (domains or ["general"])]
+        if not subject or not relation or not obj:
+            return
+        domains = [d.strip().lower() for d in (domains or ["general"]) if d]
         
         now = time.time()
 

@@ -28,7 +28,6 @@ Each triple must be:
   "object": "entity or value",
   "negated": false,           // true if the relation is denied ("không", "not", etc.)
   "condition": "",            // e.g. "at 1 atm", "in 1905", leave empty if none
-  "structural_tags": ["tag1"], // one or more path-like hierarchical tags, e.g. ["bo_luat_lao_dong_2019/chuong_3/dieu_49"] or ["paracetamol/chong_chi_dinh"]
   "confidence": 0.9           // 0.0-1.0, lower if the text is uncertain/speculative
 }}
 
@@ -42,12 +41,7 @@ Rules for Entities and Relations:
   1) {{"subject": "tim cook", "relation": "là ceo của", "object": "apple"}}
   2) {{"subject": "tim cook", "relation": "cho ra mắt", "object": "iphone 17"}}
 - Use concise, lowercase relation strings ("is a", "causes", "located in", etc.)
-
-Rules for Structural Tags:
-- Identify structural parent-child path tags for each triple based on the document's logical/physical layout.
-- For structured texts like laws, build the hierarchy based on document structure: e.g. ["bo_luat_lao_dong_2019/chuong_3/dieu_49/khoan_2"].
-- For unstructured texts like articles or medicine, build based on entity relationships: e.g. ["paracetamol/chong_chi_dinh"] or ["iphone_15/man_hinh/tan_so_quet"].
-- Always format tags as lowercase path-like strings with slashes.
+- Keep the language consistent: If the input text is in English, all extracted entity names, relations, and objects must be in English. If the input text is in Vietnamese, they must be in Vietnamese.
 
 Text:
 \"\"\"
@@ -69,9 +63,7 @@ def extract_triples(
     triples = _parse_json_array(raw)
 
     for t in triples:
-        # Map structural_tags to domains to maintain backward compatibility
-        tags = t.get("structural_tags", t.get("domains", ["general"]))
-        t["domains"] = tags
+        t["domains"] = t.get("domains", ["general"])
 
     if extra_domains:
         for t in triples:
