@@ -73,6 +73,15 @@ def cmd_interactive(args):
         print()
 
 
+def cmd_serve(args):
+    import uvicorn
+    os.environ["PRORAG_GRAPH_PATH"] = args.graph
+    if hasattr(args, "model") and args.model:
+        os.environ["PRORAG_MODEL_NAME"] = args.model
+    print(f"[prorag] Starting daemon server on {args.host}:{args.port} using graph '{args.graph}'...")
+    uvicorn.run("prorag.server:app", host=args.host, port=args.port, reload=False)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="prorag", description="ProRAG — Proactive Knowledge Graph RAG")
     parser.add_argument("--graph", default="graph.json", help="Path to graph file (default: graph.json)")
@@ -88,6 +97,11 @@ def main():
     sub.add_parser("stats", help="Show graph statistics")
     sub.add_parser("interactive", help="Interactive Q&A session")
 
+    p_serve = sub.add_parser("serve", help="Start the ProRAG local daemon server")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Host address to bind to (default: 127.0.0.1)")
+    p_serve.add_argument("--port", type=int, default=8000, help="Port to bind to (default: 8000)")
+    p_serve.add_argument("--model", default="llama-3.3-70b-versatile", help="Model name (default: llama-3.3-70b-versatile)")
+
     args = parser.parse_args()
     if args.cmd == "ingest":
         cmd_ingest(args)
@@ -97,6 +111,8 @@ def main():
         cmd_stats(args)
     elif args.cmd == "interactive":
         cmd_interactive(args)
+    elif args.cmd == "serve":
+        cmd_serve(args)
     else:
         parser.print_help()
         sys.exit(1)
