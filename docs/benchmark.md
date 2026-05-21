@@ -52,19 +52,6 @@ GROQ_API_KEY=your_key python scripts/run_benchmark.py --dataset hotpotqa --n 100
 
 > Scripts are in the `scripts/` directory (coming in v0.2).
 
-## Current results (v0.1, HotpotQA, n=100)
-
-| Metric | Naive RAG | GraphRAG | **ProRAG** |
-|---|---|---|---|
-| Hallucination rate | 22% | 18% | **4%** |
-| Accuracy (F1) | 0.61 | 0.67 | **0.79** |
-| Latency (median) | 1.8s | 4.2s | **1.3s** |
-| LLM calls/query | 1 | 3.8 | **1** |
-| Token cost (relative) | 1× | 3.5× | **0.6×** |
-| Real-time update | ❌ | ❌ | **✅** |
-
-> Note: These numbers are from an internal evaluation. Independent reproduction is encouraged and appreciated — please open an issue with your results.
-
 ## Reproduction Results (v0.1, n=5)
 
 These results were run locally using `llama-3.3-70b-versatile` on Groq.

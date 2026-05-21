@@ -28,17 +28,19 @@ result = rag.ask("Where did Einstein develop relativity?")
 | Contradictions silently merged | Contradictions **stored explicitly** with sources |
 | Black box — can't explain an answer | Every answer is **traceable to graph paths** |
 
-### Benchmark vs GraphRAG (HotpotQA, 100 questions)
+### Verified Benchmark (Space Exploration, 15 Docs, 12 Questions)
 
-| Metric | GraphRAG | ProRAG | Improvement |
+We compared ProRAG against Naive RAG on an interconnected space exploration history corpus using **`qwen/qwen3-32b`** on Groq.
+
+| Phase / Metric | Naive RAG | **ProRAG** (BFS-Optimized) | Improvement / Difference |
 |---|---|---|---|
-| Hallucination rate | ~18% | ~4% | **4.5× lower** |
-| LLM calls / query | 3–5 | **1** | **3–5× cheaper** |
-| Latency | ~4.2s | ~1.3s | **3× faster** |
-| Real-time knowledge update | ❌ | **✅** | — |
-| Explainable output | Partial | **Full** | — |
+| Ingestion Time | 0.00s | **0.00s** (Fully Cached) | Graph built proactively |
+| F1 Score (Avg) | 0.3539 | **0.5246** | **48% higher word overlap** |
+| Factual Accuracy | 70.8% (8.5/12) | **100.0%** (12/12) | **No failed multi-hop questions** |
+| Query Latency (Avg) | 4.84s | 8.84s | Extra reasoning latency from Qwen |
+| Triples used (Avg) | N/A | **38** | Complete transparency |
 
-> Benchmark methodology: [docs/benchmark.md](docs/benchmark.md)
+> Detailed report & reproduction steps: [docs/benchmark.md](docs/benchmark.md)
 
 ---
 
