@@ -29,6 +29,8 @@ class EdgeMeta:
     sources: list[str] = field(default_factory=list)
     confidence: float = 1.0
     updated_at: float = field(default_factory=time.time)
+    statement_time: str = ""
+    temporal_aspect: str = "PRESENT"
 
 
 class ProRAGGraph:
@@ -47,12 +49,16 @@ class ProRAGGraph:
         condition: str = "",
         negated: bool = False,
         confidence: float = 1.0,
+        statement_time: str = "",
+        temporal_aspect: str = "PRESENT",
     ) -> None:
         """Add a validated triple to the graph."""
         subject = self._coerce_text(subject)
         relation = self._coerce_text(relation).strip().lower()
         obj = self._coerce_text(obj)
         condition = str(condition or "").strip()
+        statement_time = str(statement_time or "").strip()
+        temporal_aspect = str(temporal_aspect or "PRESENT").strip().upper()
 
         if not subject or not relation or not obj:
             return
@@ -63,7 +69,7 @@ class ProRAGGraph:
         self._ensure_node(subject, source=source, confidence=confidence, now=now)
         self._ensure_node(obj, source=source, confidence=confidence, now=now)
 
-        existing = self._find_existing_edge(subject, relation, obj, negated, condition)
+        existing = self._find_existing_edge(subject, relation, obj, negated, condition, statement_time, temporal_aspect)
         if existing is not None:
             meta = existing["meta"]
             if source and source not in meta.sources:
@@ -72,7 +78,7 @@ class ProRAGGraph:
             meta.updated_at = now
             return
 
-        contradiction = self._find_contradicting_edge(subject, relation, obj, negated, condition)
+        contradiction = self._find_contradicting_edge(subject, relation, obj, negated, condition, statement_time, temporal_aspect)
         self._store_edge(
             subject,
             obj,
@@ -83,6 +89,8 @@ class ProRAGGraph:
                 sources=[source] if source else [],
                 confidence=confidence,
                 updated_at=now,
+                statement_time=statement_time,
+                temporal_aspect=temporal_aspect,
             ),
         )
         if contradiction is not None:
@@ -123,6 +131,8 @@ class ProRAGGraph:
         obj: str,
         negated: bool,
         condition: str,
+        statement_time: str,
+        temporal_aspect: str,
     ) -> dict | None:
         for _, tgt, data in self.g.out_edges(subject, data=True):
             meta: EdgeMeta = data["meta"]
@@ -131,6 +141,8 @@ class ProRAGGraph:
                 and data.get("relation") == relation
                 and meta.negated == negated
                 and meta.condition == condition
+                and meta.statement_time == statement_time
+                and meta.temporal_aspect == temporal_aspect
             ):
                 return data
         return None
@@ -142,6 +154,8 @@ class ProRAGGraph:
         obj: str,
         negated: bool,
         condition: str,
+        statement_time: str,
+        temporal_aspect: str,
     ) -> dict | None:
         for _, tgt, data in self.g.out_edges(subject, data=True):
             meta: EdgeMeta = data["meta"]
@@ -150,6 +164,8 @@ class ProRAGGraph:
                 and data.get("relation") == relation
                 and meta.negated != negated
                 and meta.condition == condition
+                and meta.statement_time == statement_time
+                and meta.temporal_aspect == temporal_aspect
             ):
                 return data
         return None
@@ -228,6 +244,8 @@ class ProRAGGraph:
                         "confidence": meta.confidence,
                         "sources": meta.sources,
                         "distance": min(distances.get(src, max_hops), distances.get(tgt, max_hops)),
+                        "statement_time": meta.statement_time,
+                        "temporal_aspect": meta.temporal_aspect,
                     }
                 )
 
@@ -326,6 +344,8 @@ class ProRAGGraph:
                         "sources": meta.sources,
                         "distance": min(distances.get(src, max_cost), distances.get(tgt, max_cost)),
                         "similarity": float(np.dot(question_embedding, store.embed(triple_text))),
+                        "statement_time": meta.statement_time,
+                        "temporal_aspect": meta.temporal_aspect,
                     }
                 )
 

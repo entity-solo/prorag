@@ -243,3 +243,46 @@ def test_retrieve_evidence_falls_back_to_keyword_query():
         graph.query_vector = original
     assert meta["slot"] == "what"
     assert triples[0]["subject"] == "apple"
+
+
+def test_extract_triples_normalizes_passive_voice():
+    mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
+    mock_extract_response = """
+    [
+      {"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false}
+    ]
+    """
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
+        triples = extract_triples("iPhone 15 was released by Apple.")
+    assert len(triples) == 1
+    assert triples[0]["subject"] == "apple"
+    assert triples[0]["relation"] == "released"
+    assert triples[0]["object"] == "iphone 15"
+
+
+def test_extract_triples_extracts_statement_time_and_aspect():
+    mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 16": "iphone 16"}}'
+    mock_extract_response = """
+    [
+      {"subject": "apple", "relation": "release", "object": "iphone 16", "negated": false, "condition": "if stock rises", "statement_time": "May 2026", "temporal_aspect": "FUTURE"}
+    ]
+    """
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
+        triples = extract_triples("In May 2026, Apple announced it plans to release iPhone 16 if stock rises.")
+    assert len(triples) == 1
+    assert triples[0]["statement_time"] == "May 2026"
+    assert triples[0]["temporal_aspect"] == "FUTURE"
+    assert triples[0]["condition"] == "if stock rises"
+
+
+def test_retrieve_evidence_prefers_matching_temporal_condition():
+    graph = ProRAGGraph()
+    graph.add_triple("steve jobs", "is ceo of", "apple", condition="in 1997", temporal_aspect="PAST")
+    graph.add_triple("tim cook", "is ceo of", "apple", condition="in 2020", temporal_aspect="PRESENT")
+    
+    triples, meta = retrieve_evidence("Who was CEO of Apple in 1997?", graph, top_k=2)
+    assert triples[0]["subject"] == "steve jobs"
+    
+    triples_2, meta_2 = retrieve_evidence("Who is CEO of Apple in 2020?", graph, top_k=2)
+    assert triples_2[0]["subject"] == "tim cook"
+

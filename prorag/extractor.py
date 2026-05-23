@@ -62,6 +62,13 @@ Rules:
 - Subject and object must be canonical names from the entity map.
 - Skip any fact where subject or object is null or not in the entity map.
 - Keep the same language as the input.
+- Decompose complex sentences into atomic triples (e.g., "Apple, founded by Steve Jobs in 1976, is..." becomes two triples: Jobs founded Apple in 1976, and Apple is...).
+- Normalize passive voice to active voice: If a relation in the text is passive (e.g., "A was released by B", "A được phát triển bởi B"), rewrite it in the active voice by swapping the subject and object (e.g. subject: "B", relation: "released", object: "A").
+- Separate event context, speech/assertion time, and temporal aspect:
+  - "condition": Context/precondition under which the fact is valid (e.g., "if stock rises").
+  - "statement_time": Exact date or time when this statement was asserted, spoken, or published in the document (e.g., "October 2012", "2026-05-23"). Leave as empty string if not specified.
+  - "temporal_aspect": Choose exactly one of "PAST" (events completed in the past), "PRESENT" (current states or general facts), or "FUTURE" (plans, projections, or future predictions).
+- For negations, extract the statement affirmatively and set "negated" to true.
 
 Return ONLY a JSON array:
 [
@@ -71,7 +78,9 @@ Return ONLY a JSON array:
     "object": "canonical entity name or value",
     "negated": false,
     "condition": "",
-    "confidence": 0.9
+    "confidence": 0.9,
+    "statement_time": "time statement was made",
+    "temporal_aspect": "PAST/PRESENT/FUTURE"
   }}
 ]
 
@@ -175,6 +184,8 @@ def ingest_text(
                 condition=triple.get("condition", ""),
                 negated=triple.get("negated", False),
                 confidence=float(triple.get("confidence", 1.0)),
+                statement_time=triple.get("statement_time", ""),
+                temporal_aspect=triple.get("temporal_aspect", "PRESENT"),
             )
         except (KeyError, TypeError, ValueError):
             continue
@@ -229,6 +240,8 @@ def _prepare_triple(fact: dict) -> dict | None:
         "negated": bool(fact.get("negated", False)),
         "condition": str(fact.get("condition", "") or "").strip(),
         "confidence": float(fact.get("confidence", 1.0) or 1.0),
+        "statement_time": str(fact.get("statement_time", "") or "").strip(),
+        "temporal_aspect": str(fact.get("temporal_aspect", "PRESENT") or "PRESENT").strip().upper(),
     }
 
 

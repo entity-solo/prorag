@@ -226,6 +226,15 @@ def _retrieve_candidate_triples(
         return graph.query(keywords, top_k=top_k)
 
 
+def detect_question_aspect(question: str) -> str:
+    q = question.lower()
+    if any(word in q for word in ("kế hoạch", "dự kiến", "tương lai", "plan", "predict", "forecast", "will", "would")):
+        return "FUTURE"
+    if any(word in q for word in ("đã", "từng", "quá khứ", "did", "was", "were", "happened")):
+        return "PAST"
+    return "PRESENT"
+
+
 def _rerank_triples(
     question: str,
     triples: list[dict],
@@ -238,6 +247,9 @@ def _rerank_triples(
         return []
 
     question_text = normalize_entity_name(question)
+    question_years = set(re.findall(r"\b(19\d{2}|20\d{2})\b", question_text))
+    question_aspect = detect_question_aspect(question)
+
     reranked = []
     for triple in triples:
         entity_score = _entity_alignment_score(triple, seed_entities)
@@ -248,12 +260,25 @@ def _rerank_triples(
         confidence = float(triple.get("confidence", 1.0))
         contradiction_penalty = -0.4 if str(triple.get("relation", "")).startswith("CONTRADICTS:") else 0.0
 
+        temporal_score = 0.0
+        if question_years:
+            condition_text = normalize_entity_name(triple.get("condition", ""))
+            statement_time_text = normalize_entity_name(triple.get("statement_time", ""))
+            for year in question_years:
+                if year in condition_text or year in statement_time_text:
+                    temporal_score += 1.5
+
+        triple_aspect = triple.get("temporal_aspect", "PRESENT")
+        if question_aspect == triple_aspect:
+            temporal_score += 0.5
+
         retrieval_score = (
             similarity * 1.6
             + entity_score * 1.5
             + relation_score * 1.3
             + slot_score * 1.2
             + confidence * 0.2
+            + temporal_score * 1.5
             - distance * 0.35
             + contradiction_penalty
         )
