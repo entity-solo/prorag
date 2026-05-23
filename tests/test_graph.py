@@ -98,55 +98,92 @@ def test_chunk_text_has_sentence_overlap():
 
 
 def test_extract_triples_resolves_pronoun_from_recent_entity():
-    mock_response = """
+    mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15", "It": "iphone 15", "September": "september"}}'
+    mock_extract_response = """
     [
-      {"subject_mention": "Apple", "subject": "apple", "relation": "released", "object_mention": "iPhone 15", "object": "iphone 15", "negated": false, "confidence": 1.0},
-      {"subject_mention": "It", "subject": "", "relation": "was announced in", "object_mention": "September", "object": "september", "negated": false, "confidence": 1.0}
+      {"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false, "confidence": 1.0},
+      {"subject": "iphone 15", "relation": "was announced in", "object": "september", "negated": false, "confidence": 1.0}
     ]
     """
-    with patch("prorag.extractor.call_llm", return_value=mock_response):
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
         triples = extract_triples("Apple released iPhone 15. It was announced in September.")
     assert len(triples) == 2
     assert triples[1]["subject"] == "iphone 15"
 
 
-def test_extract_triples_uses_llm_fallback_for_generic_reference():
-    extract_response = """
-    [
-      {"subject_mention": "OpenAI", "subject": "openai", "relation": "partnered with", "object_mention": "Apple", "object": "apple", "negated": false, "confidence": 1.0},
-      {"subject_mention": "The company", "subject": "", "relation": "launched", "object_mention": "a new model", "object": "a new model", "negated": false, "confidence": 0.9}
-    ]
-    """
-    coref_response = '{"resolved":"apple","confidence":0.96}'
-    with patch("prorag.extractor.call_llm", side_effect=[extract_response, coref_response]):
-        triples = extract_triples("OpenAI partnered with Apple. The company launched a new model.")
-    assert len(triples) == 2
-    assert triples[1]["subject"] == "apple"
+def test_resolve_entities_basic():
+    from prorag.extractor import resolve_entities
+    mock_response = '{"entities": {"Apple": "apple", "It": "apple", "OpenAI": "openai", "the company": "openai"}}'
+    with patch("prorag.extractor.call_llm", return_value=mock_response):
+        entity_map = resolve_entities("Apple partnered with OpenAI. The company liked it.", {"apple", "openai"})
+    assert entity_map["Apple"] == "apple"
+    assert entity_map["It"] == "apple"
+    assert entity_map["the company"] == "openai"
+
+
+def test_cross_chunk_registry_propagates():
+    from prorag.extractor import ingest_text
+    mock_entity_1 = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
+    mock_extract_1 = '[{"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false}]'
+    
+    mock_entity_2 = '{"entities": {"It": "iphone 15", "September": "september"}}'
+    mock_extract_2 = '[{"subject": "iphone 15", "relation": "was announced in", "object": "september", "negated": false}]'
+    
+    graph = ProRAGGraph()
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_1, mock_extract_1, mock_entity_2, mock_extract_2]) as mock_call:
+        count1, registry1 = ingest_text("Apple released iPhone 15.", graph, entity_registry=set())
+        assert registry1 == {"apple", "iphone 15"}
+        
+        count2, registry2 = ingest_text("It was announced in September.", graph, entity_registry=registry1)
+        assert registry2 == {"apple", "iphone 15", "september"}
+        
+        called_args = [call[0][0] for call in mock_call.call_args_list]
+        assert "apple" in called_args[2]
+        assert "iphone 15" in called_args[2]
 
 
 def test_extract_triples_drops_unresolved_pronoun_fact():
-    mock_response = """
+    mock_entity_response = '{"entities": {"It": null, "September": "september"}}'
+    mock_extract_response = """
     [
-      {"subject_mention": "It", "subject": "", "relation": "was announced in", "object_mention": "September", "object": "september", "negated": false, "confidence": 1.0}
+      {"subject": "It", "relation": "was announced in", "object": "september", "negated": false, "confidence": 1.0}
     ]
     """
-    with patch("prorag.extractor.call_llm", return_value=mock_response):
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
         triples = extract_triples("It was announced in September.")
     assert triples == []
 
 
 def test_ingest_text_full_pipeline_avoids_pronoun_nodes():
-    mock_response = """
+    mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15", "It": "iphone 15", "September": "september"}}'
+    mock_extract_response = """
     [
-      {"subject_mention": "Apple", "subject": "apple", "relation": "released", "object_mention": "iPhone 15", "object": "iphone 15", "negated": false, "confidence": 1.0},
-      {"subject_mention": "It", "subject": "", "relation": "was announced in", "object_mention": "September", "object": "september", "negated": false, "confidence": 1.0}
+      {"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false, "confidence": 1.0},
+      {"subject": "iphone 15", "relation": "was announced in", "object": "september", "negated": false, "confidence": 1.0}
     ]
     """
     graph = ProRAGGraph()
-    with patch("prorag.extractor.call_llm", return_value=mock_response):
-        added = ingest_text("Apple released iPhone 15. It was announced in September.", graph)
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
+        added, registry = ingest_text("Apple released iPhone 15. It was announced in September.", graph)
     assert added == 2
     assert "it" not in graph.g.nodes
+    assert "iphone 15" in graph.g.nodes
+
+
+def test_ingest_file_builds_registry():
+    from prorag.extractor import ingest_file
+    from unittest.mock import mock_open
+    
+    mock_content = "Apple released iPhone 15. It was announced in September."
+    mock_entity_1 = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
+    mock_extract_1 = '[{"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false}]'
+    
+    graph = ProRAGGraph()
+    with patch("builtins.open", mock_open(read_data=mock_content)), \
+         patch("prorag.extractor.call_llm", side_effect=[mock_entity_1, mock_extract_1]):
+        total = ingest_file("dummy.txt", graph, chunk_size=1000)
+    assert total == 1
+    assert "apple" in graph.g.nodes
     assert "iphone 15" in graph.g.nodes
 
 

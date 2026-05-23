@@ -1,5 +1,5 @@
 """
-Ingestion pipeline: text -> mention facts -> coreference cleanup -> graph writes.
+Ingestion pipeline: text -> entity resolution -> relation extraction -> graph writes.
 """
 
 from __future__ import annotations
@@ -7,89 +7,164 @@ from __future__ import annotations
 import json
 import re
 
-from .entity_utils import (
-    is_neutral_reference,
-    is_person_like_entity,
-    is_person_reference,
-    is_plural_reference,
-    is_unresolved_reference,
-    normalize_entity_name,
-)
+from .entity_utils import is_unresolved_reference, normalize_entity_name
 from .graph import ProRAGGraph
 from .llm import call_llm
 
-_EXTRACT_PROMPT = """\
-You are a knowledge graph extractor.
+_ENTITY_RESOLUTION_PROMPT = """\
+You are an entity resolution assistant.
 
-Given a text passage, extract factual statements as JSON objects in text order.
-Return ONLY a JSON array.
-
-Each fact object must follow this schema:
-{{
-  "subject_mention": "surface mention from the text",
-  "subject": "canonical entity name if clear, else empty string",
-  "relation": "relation verb or phrase",
-  "object_mention": "surface mention from the text",
-  "object": "canonical entity or value if clear, else empty string",
-  "negated": false,
-  "condition": "",
-  "confidence": 0.9
-}}
+Find ALL noun phrases, pronouns, and references in the text.
+Map each mention to its canonical entity name.
 
 Rules:
-- Extract explicit facts and strong nested facts.
-- Keep the same language as the input.
-- Resolve pronouns or generic mentions only when the antecedent is clear.
-- If unclear, keep the mention and leave the canonical field empty.
-- Do not invent facts.
+- Named entities (people, places, orgs, products, dates, numbers): use the most complete and specific form.
+- Pronouns (he, she, it, they, him, her, "ông", "cô", "họ", "anh", "chị", ...): resolve to the entity they refer to in order of appearance.
+- Generic references ("the company", "the device", "công ty này", "tổ chức đó", ...): resolve to the specific entity they refer to.
+- If a mention refers to a known entity from the list below: use that exact known entity name.
+- If a mention is a new entity not in the known list: create a canonical name using the most complete form found in the text.
+- If a mention is ambiguous and cannot be confidently resolved: map to null.
+- Keep the same language as the input for canonical names.
+
+Known entities (from previous context):
+{known_entities}
 
 Text:
 \"\"\"
 {text}
 \"\"\"
 
-JSON array:"""
-
-_COREF_PROMPT = """\
-You are resolving a reference inside a passage.
-Choose the single best antecedent from the candidate list.
 Return ONLY JSON:
-{{"resolved": "exact candidate text or empty string", "confidence": 0.0}}
+{{
+  "entities": {{
+    "<mention as it appears in text>": "<canonical name or null>",
+    ...
+  }}
+}}"""
 
-Passage:
+_EXTRACT_PROMPT = """\
+You are a knowledge graph extractor.
+
+Extract factual relations between entities from the text.
+Use ONLY the canonical entity names provided in the entity map below.
+Do not use any mention that maps to null.
+
+Entity map:
+{entity_map}
+
+Text:
 \"\"\"
 {text}
 \"\"\"
 
-Mention: {mention}
-Candidates: {candidates}
-JSON:"""
+Rules:
+- Extract only explicit facts. Do not invent facts.
+- Subject and object must be canonical names from the entity map.
+- Skip any fact where subject or object is null or not in the entity map.
+- Keep the same language as the input.
+
+Return ONLY a JSON array:
+[
+  {{
+    "subject": "canonical entity name",
+    "relation": "relation verb or phrase",
+    "object": "canonical entity name or value",
+    "negated": false,
+    "condition": "",
+    "confidence": 0.9
+  }}
+]
+
+JSON array:"""
+
+
+def resolve_entities(
+    text: str,
+    entity_registry: set[str],
+    llm_model: str = "llama-3.3-70b-versatile",
+) -> dict[str, str | None]:
+    """Find all mentions in text and map each to a canonical entity name.
+
+    Uses entity_registry (known entities from previous chunks) as candidates.
+    Returns entity_map {mention -> canonical_name or None if ambiguous}.
+    """
+    prompt = _ENTITY_RESOLUTION_PROMPT.format(
+        known_entities=json.dumps(sorted(entity_registry), ensure_ascii=False),
+        text=text.strip(),
+    )
+    raw = call_llm(prompt, model=llm_model, max_tokens=1024)
+    parsed = _parse_json_object(raw)
+    raw_map = parsed.get("entities", {}) if parsed else {}
+
+    entity_map: dict[str, str | None] = {}
+    for mention, canonical in raw_map.items():
+        mention_str = str(mention).strip()
+        if not mention_str:
+            continue
+        if canonical is None:
+            entity_map[mention_str] = None
+        else:
+            canonical_norm = normalize_entity_name(str(canonical).strip())
+            entity_map[mention_str] = canonical_norm if canonical_norm else None
+    return entity_map
 
 
 def extract_triples(
     text: str,
+    entity_map: dict[str, str | None] | None = None,
     source: str = "",
     llm_model: str = "llama-3.3-70b-versatile",
 ) -> list[dict]:
-    """Return validated canonical triples extracted from a text passage."""
-    prompt = _EXTRACT_PROMPT.format(text=text.strip())
+    """Extract canonical triples from text using the resolved entity map.
+
+    If entity_map is not provided, resolve_entities is called first with an
+    empty registry (single-chunk usage, backward compatible).
+    """
+    if entity_map is None:
+        entity_map = resolve_entities(text, set(), llm_model)
+
+    valid_map = {k: v for k, v in entity_map.items() if v is not None}
+    prompt = _EXTRACT_PROMPT.format(
+        entity_map=json.dumps(valid_map, ensure_ascii=False),
+        text=text.strip(),
+    )
     raw = call_llm(prompt, model=llm_model, max_tokens=3072)
     raw_facts = _parse_json_array(raw)
-    triples = _normalize_extracted_facts(raw_facts, text=text, llm_model=llm_model)
-    if source:
-        for triple in triples:
-            triple["source"] = source
+
+    triples = []
+    for fact in raw_facts:
+        if not isinstance(fact, dict):
+            continue
+        triple = _prepare_triple(fact)
+        if triple and _is_valid_triple(triple):
+            if source:
+                triple["source"] = source
+            triples.append(triple)
     return triples
 
 
 def ingest_text(
     text: str,
     graph: ProRAGGraph,
+    entity_registry: set[str] | None = None,
     source: str = "",
     llm_model: str = "llama-3.3-70b-versatile",
-) -> int:
-    """Extract canonical triples from text and add them to the graph."""
-    triples = extract_triples(text, source=source, llm_model=llm_model)
+) -> tuple[int, set[str]]:
+    """Extract canonical triples from text and add them to the graph.
+
+    Returns (triple_count, updated_entity_registry).
+    entity_registry accumulates known canonical names across chunks.
+    """
+    if entity_registry is None:
+        entity_registry = set()
+
+    entity_map = resolve_entities(text, entity_registry, llm_model)
+
+    new_registry = entity_registry | {
+        v for v in entity_map.values() if v is not None
+    }
+
+    triples = extract_triples(text, entity_map, source=source, llm_model=llm_model)
     for triple in triples:
         try:
             graph.add_triple(
@@ -103,7 +178,8 @@ def ingest_text(
             )
         except (KeyError, TypeError, ValueError):
             continue
-    return len(triples)
+
+    return len(triples), new_registry
 
 
 def ingest_file(
@@ -114,158 +190,46 @@ def ingest_file(
     chunk_size: int = 1500,
     overlap_sentences: int = 1,
 ) -> int:
-    """Read a plain-text file and ingest all chunks."""
+    """Read a plain-text file and ingest all chunks.
+
+    Entity registry is propagated across chunks so cross-chunk references
+    (pronouns, generic refs) are resolved correctly.
+    """
     with open(path, encoding="utf-8") as handle:
         content = handle.read()
 
+    entity_registry: set[str] = set()
     total = 0
+
     for chunk in _chunk_text(content, chunk_size, overlap_sentences=overlap_sentences):
-        total += ingest_text(chunk, graph, source=source or path, llm_model=llm_model)
+        count, entity_registry = ingest_text(
+            chunk,
+            graph,
+            entity_registry,
+            source=source or path,
+            llm_model=llm_model,
+        )
+        total += count
+
     return total
 
 
-def _normalize_extracted_facts(raw_facts: list[dict], text: str, llm_model: str) -> list[dict]:
-    prepared = [_prepare_fact(fact) for fact in raw_facts if isinstance(fact, dict)]
-    recent_entities: list[str] = []
-    normalized: list[dict] = []
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-    for fact in prepared:
-        fact["subject"] = _resolve_entity(
-            fact,
-            field="subject",
-            text=text,
-            recent_entities=recent_entities,
-            llm_model=llm_model,
-        )
-        _remember_entity(recent_entities, fact["subject"])
-
-        fact["object"] = _resolve_entity(
-            fact,
-            field="object",
-            text=text,
-            recent_entities=recent_entities,
-            llm_model=llm_model,
-        )
-        _remember_entity(recent_entities, fact["object"])
-
-        fact["relation"] = _normalize_relation(fact.get("relation", ""))
-        fact["condition"] = str(fact.get("condition", "") or "").strip()
-        fact["confidence"] = float(fact.get("confidence", 1.0) or 1.0)
-        fact["negated"] = bool(fact.get("negated", False))
-        fact["unresolved_coref"] = not bool(fact["subject"] and fact["object"])
-
-        if _is_valid_triple(fact):
-            normalized.append(fact)
-
-    return normalized
-
-
-def _prepare_fact(fact: dict) -> dict:
-    subject_mention = fact.get("subject_mention", fact.get("subject", ""))
-    object_mention = fact.get("object_mention", fact.get("object", ""))
+def _prepare_triple(fact: dict) -> dict | None:
+    subject = normalize_entity_name(str(fact.get("subject", "") or ""))
+    relation = _normalize_relation(fact.get("relation", ""))
+    obj = normalize_entity_name(str(fact.get("object", "") or ""))
+    if not subject or not relation or not obj:
+        return None
     return {
-        "subject_mention": str(subject_mention or "").strip(),
-        "subject": str(fact.get("subject", "") or "").strip(),
-        "relation": str(fact.get("relation", "") or "").strip(),
-        "object_mention": str(object_mention or "").strip(),
-        "object": str(fact.get("object", "") or "").strip(),
-        "negated": fact.get("negated", False),
-        "condition": fact.get("condition", ""),
-        "confidence": fact.get("confidence", 1.0),
+        "subject": subject,
+        "relation": relation,
+        "object": obj,
+        "negated": bool(fact.get("negated", False)),
+        "condition": str(fact.get("condition", "") or "").strip(),
+        "confidence": float(fact.get("confidence", 1.0) or 1.0),
     }
-
-
-def _resolve_entity(
-    fact: dict,
-    field: str,
-    text: str,
-    recent_entities: list[str],
-    llm_model: str,
-) -> str:
-    canonical = normalize_entity_name(fact.get(field, ""))
-    mention = normalize_entity_name(fact.get(f"{field}_mention", ""))
-
-    if canonical and not is_unresolved_reference(canonical):
-        return canonical
-    if mention and not is_unresolved_reference(mention):
-        return mention
-    if not mention:
-        return ""
-
-    resolved = _resolve_reference(mention, text, recent_entities, llm_model)
-    return normalize_entity_name(resolved)
-
-
-def _resolve_reference(
-    mention: str,
-    text: str,
-    recent_entities: list[str],
-    llm_model: str,
-) -> str:
-    mention = normalize_entity_name(mention)
-    candidates = _distinct_recent_entities(recent_entities)
-    if not mention or not candidates:
-        return ""
-
-    heuristic = _resolve_reference_heuristic(mention, candidates)
-    if heuristic and (len(candidates) == 1 or is_person_reference(mention) or is_plural_reference(mention)):
-        return heuristic
-
-    llm_resolved = _resolve_reference_with_llm(mention, text, candidates, llm_model)
-    return llm_resolved or heuristic
-
-
-def _distinct_recent_entities(recent_entities: list[str], limit: int = 8) -> list[str]:
-    ordered: list[str] = []
-    for entity in reversed(recent_entities):
-        if entity and entity not in ordered:
-            ordered.append(entity)
-        if len(ordered) >= limit:
-            break
-    return ordered
-
-
-def _resolve_reference_heuristic(mention: str, candidates: list[str]) -> str:
-    if is_plural_reference(mention):
-        return " and ".join(candidates[:2]) if len(candidates) >= 2 else candidates[0]
-    if is_person_reference(mention):
-        for candidate in candidates:
-            if is_person_like_entity(candidate):
-                return candidate
-    if is_neutral_reference(mention):
-        return candidates[0]
-    return candidates[0]
-
-
-def _resolve_reference_with_llm(
-    mention: str,
-    text: str,
-    candidates: list[str],
-    llm_model: str,
-) -> str:
-    prompt = _COREF_PROMPT.format(
-        text=text.strip(),
-        mention=mention,
-        candidates=json.dumps(candidates, ensure_ascii=False),
-    )
-    try:
-        raw = call_llm(prompt, model=llm_model, max_tokens=256)
-    except Exception:
-        return ""
-
-    parsed = _parse_json_object(raw)
-    resolved = normalize_entity_name(parsed.get("resolved", "")) if parsed else normalize_entity_name(raw)
-    candidate_map = {normalize_entity_name(candidate): candidate for candidate in candidates}
-    return candidate_map.get(resolved, "")
-
-
-def _remember_entity(recent_entities: list[str], entity: str, limit: int = 16) -> None:
-    entity = normalize_entity_name(entity)
-    if not entity or is_unresolved_reference(entity):
-        return
-    recent_entities.append(entity)
-    if len(recent_entities) > limit:
-        del recent_entities[:-limit]
 
 
 def _normalize_relation(relation: str) -> str:
@@ -325,7 +289,7 @@ def _parse_json_object(text: str) -> dict:
 
 
 def _chunk_text(text: str, size: int, overlap_sentences: int = 1) -> list[str]:
-    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?\n])\s+", text) if sentence.strip()]
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", text) if s.strip()]
     if not sentences:
         return []
 

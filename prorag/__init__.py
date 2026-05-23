@@ -15,7 +15,8 @@ class ProRAG:
         self.model = model
 
     def ingest(self, text: str, source: str = "") -> int:
-        return ingest_text(text, self.graph, source=source, llm_model=self.model)
+        count, _ = ingest_text(text, self.graph, source=source, llm_model=self.model)
+        return count
 
     def ingest_file(self, path: str, source: str | None = None) -> int:
         return ingest_file(path, self.graph, source=source, llm_model=self.model)
