@@ -11,30 +11,16 @@ ProRAG ingests text into an entity graph, resolves simple references during inge
 ProRAG uses a two-phase architecture: **Grounded Knowledge Graph Ingestion** and **Context-Guided Graph Retrieval**.
 
 ```mermaid
-flowchart TD
-    subgraph Ingestion [1. Ingestion Pipeline]
-        A[Raw Text / File] --> B[Sentence Splitting]
-        B --> C[Sentence Batching: Size 8]
-        C --> D[Lazy Context ER Retry Loop]
-        D --> E[Mention Substitution / Annotation]
-        E --> F[Relation Extraction]
-        F --> G[Passive Voice Auto-Correction]
-        G --> H[Validated Triples]
-    end
+graph TD
+    %% Ingestion Flow
+    A[Raw Text / File] --> B[Ingestion Pipeline <br/> - Sentence Batching <br/> - Lazy Context ER <br/> - Mention Annotation]
+    B --> C[(ProRAG Graph Database)]
 
-    subgraph Query [2. Query Pipeline]
-        J[User Question / Query] --> K[Slot & Keyword Detection]
-    end
-
-    %% Storage & Search
-    H --> I[(ProRAG Graph Database)]
-    I --> L[Graph Retrieval & Search]
-    K --> L
-
-    %% Synthesis
-    L --> M[Rerank & Path Selection]
-    M --> N[QA Synthesis LLM Call]
-    N --> O[Concise Answer]
+    %% Query Flow
+    D[User Question / Query] --> E[Evidence Retrieval <br/> - Semantic + Keyword Search <br/> - Evidence Path Reranking]
+    C --> E
+    E --> F[QA Synthesis LLM Call]
+    F --> G[Concise Answer]
 ```
 
 ### 1. Ingestion Pipeline
