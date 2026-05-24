@@ -82,11 +82,121 @@ def test_alias_bridging():
     assert "chief of protocol" in {item["object"] for item in results}
 
 
-def test_graph_rejects_unresolved_pronouns():
+def test_add_attribute():
     graph = ProRAGGraph()
-    graph.add_triple("it", "announced", "iphone 15")
-    graph.add_triple("apple", "announced", "it")
-    assert graph.stats() == {"nodes": 0, "edges": 0}
+    graph.add_attribute("steve jobs", "died_on", "october 5 2011")
+    graph.add_attribute("steve jobs", "role", "ceo")
+    
+    assert "steve jobs" in graph.g.nodes
+    meta = graph.g.nodes["steve jobs"]["meta"]
+    assert meta.node_type == "entity"
+    assert meta.attributes["died_on"] == "october 5 2011"
+    assert meta.attributes["role"] == "ceo"
+
+
+def test_add_event():
+    graph = ProRAGGraph()
+    graph.add_event("iphone_launch_2007", "actor", "steve jobs")
+    graph.add_event("iphone_launch_2007", "time", "january 2007")
+
+    assert "iphone_launch_2007" in graph.g.nodes
+    event_meta = graph.g.nodes["iphone_launch_2007"]["meta"]
+    assert event_meta.node_type == "event"
+
+    assert "steve jobs" in graph.g.nodes
+    assert "january 2007" in graph.g.nodes
+    assert graph.g.nodes["january 2007"]["meta"].node_type == "temporal"
+
+    edges = list(graph.g.out_edges("iphone_launch_2007", data=True))
+    assert len(edges) == 2
+    relations = {data["relation"] for _, _, data in edges}
+    assert relations == {"actor", "time"}
+
+
+
+def test_merge_entities():
+    graph = ProRAGGraph()
+    graph.add_relation("Steve Jobs", "founded", "Apple")
+    graph.add_relation("Steve Jobs", "ceo of", "Apple")
+    graph.add_relation("Steve", "founded", "Apple")
+    graph.add_relation("Steve", "ceo of", "Apple")
+
+    assert "steve jobs" in graph.g.nodes
+    assert "steve" in graph.g.nodes
+
+    graph.merge_entities(name_similarity_threshold=0.5, fingerprint_threshold=0.5)
+
+    assert "steve jobs" in graph.g.nodes
+    assert "steve" not in graph.g.nodes
+    meta = graph.g.nodes["steve jobs"]["meta"]
+    assert "steve" in meta.aliases
+
+
+def test_resolve_entities_with_known_entities():
+    from prorag.extractor import resolve_entities
+    
+    mock_response = '{"entities": {"Apple": "apple", "It": "apple"}}'
+    
+    with patch("prorag.extractor.call_llm", return_value=mock_response) as mock_call:
+        entity_map = resolve_entities(
+            "Apple released iPhone.",
+            known_entities={"apple", "iphone"}
+        )
+        
+    assert entity_map["Apple"] == "apple"
+    
+    called_prompt = mock_call.call_args[0][0]
+    assert '"apple"' in called_prompt
+    assert '"iphone"' in called_prompt
+
+
+def test_extract_facts_mixed():
+    from prorag.extractor import extract_facts
+    
+    mock_entity_response = '{"entities": {"Steve Jobs": "steve jobs", "Apple": "apple"}}'
+    mock_extract_response = """
+    [
+      {"type": "relation", "subject": "steve jobs", "relation": "founded", "object": "apple", "negated": false},
+      {"type": "attribute", "subject": "steve jobs", "key": "died_on", "value": "october 5 2011"},
+      {"type": "event", "event_id": "iphone_launch_2007", "role": "actor", "entity": "steve jobs"}
+    ]
+    """
+    
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
+        facts = extract_facts("Steve Jobs founded Apple and died on October 5 2011.")
+        
+    assert len(facts) == 3
+    assert facts[0]["type"] == "relation"
+    assert facts[1]["type"] == "attribute"
+    assert facts[2]["type"] == "event"
+
+
+def test_ingest_text_routes_mixed_facts():
+    from prorag.extractor import ingest_text
+    
+    mock_entity_response = '{"entities": {"Steve Jobs": "steve jobs", "Apple": "apple"}}'
+    mock_extract_response = """
+    [
+      {"type": "relation", "subject": "steve jobs", "relation": "founded", "object": "apple", "negated": false},
+      {"type": "attribute", "subject": "steve jobs", "key": "died_on", "value": "october 5 2011"},
+      {"type": "event", "event_id": "iphone_launch_2007", "role": "actor", "entity": "steve jobs"}
+    ]
+    """
+    
+    graph = ProRAGGraph()
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
+        count, registry = ingest_text("Steve Jobs founded Apple.", graph)
+        
+    assert count == 3
+    assert "steve jobs" in graph.g.nodes
+    assert "apple" in graph.g.nodes
+    assert "iphone_launch_2007" in graph.g.nodes
+    
+    assert graph.g.nodes["steve jobs"]["meta"].attributes["died_on"] == "october 5 2011"
+    edges = list(graph.g.out_edges("iphone_launch_2007", data=True))
+    assert len(edges) == 1
+    assert edges[0][1] == "steve jobs"
+    assert edges[0][2]["relation"] == "actor"
 
 
 def test_extract_triples_resolves_pronoun_from_recent_entity():
@@ -268,32 +378,6 @@ def test_extract_triples_normalizes_passive_voice():
     assert triples[0]["object"] == "iphone 15"
 
 
-def test_extract_triples_normalizes_passive_voice_fallback():
-    # Test passive voice auto-correction helper on LLM failure to follow instructions
-    mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
-    mock_extract_response = """
-    [
-      {"subject": "iphone 15", "relation": "was released by", "object": "apple", "negated": false}
-    ]
-    """
-    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
-        triples = extract_triples("iPhone 15 was released by Apple.")
-    assert len(triples) == 1
-    assert triples[0]["subject"] == "apple"
-    assert triples[0]["relation"] == "released"
-    assert triples[0]["object"] == "iphone 15"
-
-
-def test_fix_passive():
-    from prorag.extractor import _fix_passive
-    
-    # Test English passive voice with by
-    t1 = {"subject": "iphone 15", "relation": "was released by", "object": "apple"}
-    res1 = _fix_passive(t1)
-    assert res1["subject"] == "apple"
-    assert res1["object"] == "iphone 15"
-    assert res1["relation"] == "released"
-
 
 def test_substitute_mentions():
     from prorag.extractor import substitute_mentions
@@ -334,3 +418,43 @@ def test_retrieve_evidence_prefers_matching_temporal_condition():
     
     triples_2, meta_2 = retrieve_evidence("Who is CEO of Apple in 2020?", graph, top_k=2)
     assert triples_2[0]["subject"] == "tim cook"
+
+
+def test_detect_seed_entities_matches_aliases():
+    from prorag.pipeline import _detect_seed_entities
+    graph = ProRAGGraph()
+    graph.add_relation("Steve Jobs", "founded", "Apple")
+    graph.g.nodes["steve jobs"]["meta"].aliases = ["Steve", "Stephan"]
+    
+    seeds = _detect_seed_entities("Who is Stephan?", graph, limit=5)
+    assert "steve jobs" in seeds
+
+
+def test_format_context_rich_metadata():
+    from prorag.pipeline import _format_context
+    triples = [
+        {
+            "subject": "apple",
+            "relation": "released",
+            "object": "iphone 15",
+            "negated": False,
+            "condition": "in September",
+            "confidence": 1.0,
+            "aspect": "perfective",
+            "modality": "certain",
+            "quantifier": "all",
+            "evidentiality": "direct",
+            "speech_act": "assertion",
+            "causal": "event_123",
+            "temporal_aspect": "PAST"
+        }
+    ]
+    context, sources, has_contradictions = _format_context(triples)
+    assert "- apple released iphone 15 [in September]" in context
+    assert "aspect: perfective" in context
+    assert "modality: certain" in context
+    assert "quantifier: all" in context
+    assert "evidentiality: direct" in context
+    assert "speech_act: assertion" in context
+    assert "caused by: event_123" in context
+    assert "temporal: PAST" in context

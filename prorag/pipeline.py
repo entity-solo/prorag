@@ -151,7 +151,7 @@ def _detect_seed_entities(question: str, graph: ProRAGGraph, limit: int = 5) -> 
     keywords = _keywords_from_question(question)
     lexical_scores: dict[str, float] = {}
 
-    for node in graph.g.nodes:
+    for node, data in graph.g.nodes(data=True):
         node_text = normalize_entity_name(node)
         score = 0.0
         for keyword in keywords:
@@ -164,8 +164,24 @@ def _detect_seed_entities(question: str, graph: ProRAGGraph, limit: int = 5) -> 
                 score += 1.5
             elif node_text in keyword and len(node_text) >= 3:
                 score += 1.0
+
+        meta = data.get("meta")
+        if meta and hasattr(meta, "aliases") and meta.aliases:
+            for alias in meta.aliases:
+                alias_text = normalize_entity_name(alias)
+                for keyword in keywords:
+                    keyword = normalize_entity_name(keyword)
+                    if not keyword:
+                        continue
+                    if keyword == alias_text:
+                        score += 3.0
+                    elif keyword in alias_text:
+                        score += 1.5
+                    elif alias_text in keyword and len(alias_text) >= 3:
+                        score += 1.0
+
         if score > 0:
-            lexical_scores[node] = score
+            lexical_scores[node] = max(lexical_scores.get(node, 0.0), score)
 
     try:
         from .embeddings import EmbeddingStore
@@ -560,19 +576,38 @@ def _format_context(triples: list[dict], graph: ProRAGGraph | None = None) -> tu
         condition = f" [{triple['condition']}]" if triple.get("condition") else ""
         confidence = triple.get("confidence", 1.0)
         confidence_suffix = f" (confidence: {confidence:.1f})" if confidence < 0.8 else ""
+
+        meta_parts = []
+        if triple.get("aspect"):
+            meta_parts.append(f"aspect: {triple['aspect']}")
+        if triple.get("modality"):
+            meta_parts.append(f"modality: {triple['modality']}")
+        if triple.get("quantifier"):
+            meta_parts.append(f"quantifier: {triple['quantifier']}")
+        if triple.get("evidentiality"):
+            meta_parts.append(f"evidentiality: {triple['evidentiality']}")
+        if triple.get("speech_act"):
+            meta_parts.append(f"speech_act: {triple['speech_act']}")
+        if triple.get("causal"):
+            meta_parts.append(f"caused by: {triple['causal']}")
+        if triple.get("temporal_aspect") and triple["temporal_aspect"] != "PRESENT":
+            meta_parts.append(f"temporal: {triple['temporal_aspect']}")
+
+        meta_suffix = f" ({', '.join(meta_parts)})" if meta_parts else ""
+
         relation = triple["relation"]
         if relation.startswith("CONTRADICTS:"):
             has_contradictions = True
             relation = f"CONTRADICTS {relation[12:]}"
-        lines.append(f"- {triple['subject']} {negation}{relation} {triple['object']}{condition}{confidence_suffix}")
-        
+        lines.append(f"- {triple['subject']} {negation}{relation} {triple['object']}{condition}{confidence_suffix}{meta_suffix}")
+
         for src in triple.get("sources", []):
             sources.append(src)
             if graph and hasattr(graph, "chunks") and src in graph.chunks:
                 unique_sources.add(src)
 
     formatted_triples = "\n".join(lines)
-    
+
     if graph and hasattr(graph, "chunks") and unique_sources:
         chunk_texts = [f"[{src}]: {graph.chunks[src]}" for src in sorted(unique_sources)]
         formatted_chunks = "\n\n".join(chunk_texts)

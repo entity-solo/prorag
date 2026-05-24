@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 
-from .entity_utils import is_unresolved_reference, normalize_entity_name
+from .entity_utils import normalize_entity_name
 from .graph import ProRAGGraph
 from .llm import call_llm
 
@@ -46,9 +46,18 @@ Return ONLY JSON:
 _EXTRACT_PROMPT = """\
 You are a knowledge graph extractor.
 
-Extract factual relations between entities from the text.
+Extract factual relations, attributes, and events from the text.
 The text contains annotated canonical entities enclosed in square brackets, like [entity name].
-Use ONLY these annotated entities as subjects and objects. Do not extract relations for any text not marked as an entity.
+
+For each fact, categorize it into exactly one of three types:
+1. "relation": A standard relationship between two annotated entities.
+   - Requires: "subject" (an annotated entity) and "object" (an annotated entity).
+2. "attribute": A property/attribute of an annotated entity, where the value is a literal/value, not another entity (e.g. [steve jobs] has attribute "died_on" = "october 5 2011").
+   - Requires: "subject" (an annotated entity), "key" (attribute key), and "value" (attribute value).
+3. "event": An n-ary event involving participants, times, or places.
+   - For each event, generate a unique event ID in snake_case (e.g. "iphone_launch_2007" or "company_founding_1976").
+   - Extract the participant roles (e.g., actor, object, location, time) as separate event facts.
+   - Requires: "event_id" (generated event identifier), "role" (the role, e.g. actor, object, location, time), and "entity" (the entity or value playing that role, which may be annotated).
 
 Text:
 \"\"\"
@@ -56,28 +65,65 @@ Text:
 \"\"\"
 
 Rules:
-- Extract all explicit facts, including very minor, secondary, or seemingly trivial details (e.g., clothing items worn by individuals, specific actions during an event, physical attributes, small descriptive facts, relationships between objects).
-- Subject and object must be exactly one of the annotated canonical entity names from the text (without the square brackets).
+- Subject, object, and entity values must use the exact annotated canonical entity names from the text (without the square brackets) if they refer to annotated entities.
 - Keep the same language as the input.
-- Decompose complex sentences into atomic triples (e.g., "[apple], founded by [steve jobs] in [1976], is..." becomes: subject: "steve jobs", relation: "founded", object: "apple"; subject: "steve jobs", relation: "founded in", object: "1976"; subject: "apple", relation: "is"...).
-- Normalize passive voice to active voice: If a relation in the text is passive (e.g., "A was released by B"), rewrite it in the active voice by swapping the subject and object (e.g. subject: "B", relation: "released", object: "A").
-- Separate event context, speech/assertion time, and temporal aspect:
-  - "condition": Context/precondition under which the fact is valid (e.g., "if stock rises", "at the 2007 iphone launch").
-  - "statement_time": Exact date or time when this statement was asserted, spoken, or published in the document. Leave as empty string if not specified.
-  - "temporal_aspect": Choose exactly one of "PAST" (events completed in the past), "PRESENT" (current states or general facts), or "FUTURE" (plans, projections, or future predictions).
-- For negations, extract the statement affirmatively and set "negated" to true.
+- Decompose complex statements into atomic facts.
+- Normalize passive voice to active voice for relations (e.g., "A was released by B" -> subject: B, relation: released, object: A).
+- Extract the following linguistic metadata for all "relation" and "event" facts:
+  - "condition": Context/precondition under which the fact is valid (e.g., "if stock rises").
+  - "negated": Boolean (true/false) indicating if the fact is negated.
+  - "confidence": Float (0.0 to 1.0) indicating belief/probability (default: 1.0).
+  - "temporal_aspect": Choose exactly one of "PAST" (events completed in the past), "PRESENT" (current states or general facts), or "FUTURE" (plans, projections).
+  - "aspect": Aspect of the action: choose one of "perfective" (completed action), "imperfective" (ongoing), "prospective" (about to happen), "habitual" (repeating), or leave as empty string if not specified.
+  - "modality": Modal semantics: choose one of "certain" (asserted fact), "possible" (might happen), "necessary" (must happen), "counterfactual" (did not happen), or leave as empty string if not specified.
+  - "quantifier": Quantification: "all", "some", "most", "over", "less_than", or empty string.
+  - "evidentiality": Evidentiality: choose "direct" (direct observation), "reported" (someone said), "inferred" (reasoned), or empty string.
+  - "speech_act": Pragmatics: choose "assertion" (fact claim), "claim" (unverified claim), "question", or empty string.
+  - "causal": Event ID which is the cause of this fact, or empty string.
+  - "statement_time": Exact date or time when this statement was asserted/spoken in the document.
 
-Return ONLY a JSON array:
+Return ONLY a JSON array of objects, where each object has a "type" field ("relation", "attribute", or "event"):
 [
   {{
+    "type": "relation",
     "subject": "canonical entity name",
     "relation": "relation verb or phrase",
-    "object": "canonical entity name or value",
+    "object": "canonical entity name",
     "negated": false,
     "condition": "",
     "confidence": 0.9,
     "statement_time": "time statement was made",
-    "temporal_aspect": "PAST/PRESENT/FUTURE"
+    "temporal_aspect": "PAST/PRESENT/FUTURE",
+    "aspect": "",
+    "modality": "",
+    "quantifier": "",
+    "evidentiality": "",
+    "speech_act": "",
+    "causal": ""
+  }},
+  {{
+    "type": "attribute",
+    "subject": "canonical entity name",
+    "key": "attribute key",
+    "value": "attribute value",
+    "confidence": 1.0
+  }},
+  {{
+    "type": "event",
+    "event_id": "iphone_launch_2007",
+    "role": "actor",
+    "entity": "steve jobs",
+    "negated": false,
+    "condition": "",
+    "confidence": 1.0,
+    "statement_time": "january 2007",
+    "temporal_aspect": "PAST",
+    "aspect": "",
+    "modality": "",
+    "quantifier": "",
+    "evidentiality": "",
+    "speech_act": "",
+    "causal": ""
   }}
 ]
 
@@ -87,6 +133,7 @@ JSON array:"""
 def resolve_entities(
     text: str,
     history_sentences: list[str] | set[str] | None = None,
+    known_entities: list[str] | set[str] | None = None,
     llm_model: str = "llama-3.3-70b-versatile",
 ) -> dict[str, str | None]:
     """Find all mentions in text and map each to a canonical entity name.
@@ -106,6 +153,8 @@ def resolve_entities(
         return _parse_entity_map(raw)
 
     history_list = list(history_sentences) if history_sentences else []
+    known_list = sorted(list(known_entities)) if known_entities else []
+    known_str = json.dumps(known_list, ensure_ascii=False)
     max_retries = 2
     expand_sentences = 4
 
@@ -122,7 +171,7 @@ def resolve_entities(
             )
 
         prompt = _ENTITY_RESOLUTION_PROMPT.format(
-            known_entities="[]",
+            known_entities=known_str,
             text=text_input,
         )
         raw = call_llm(prompt, model=llm_model, max_tokens=1024)
@@ -156,18 +205,13 @@ def substitute_mentions(text: str, entity_map: dict[str, str | None]) -> str:
     return text
 
 
-def extract_triples(
+def extract_facts(
     text: str,
     entity_map: dict[str, str | None] | None = None,
     source: str = "",
     llm_model: str = "llama-3.3-70b-versatile",
 ) -> list[dict]:
-    """Extract canonical triples from text using the resolved entities.
-
-    Accepts annotated text (containing square brackets like [canonical name]).
-    For backward compatibility, if entity_map is provided or if text is raw (no brackets),
-    it resolves entities first and substitutes them before extracting.
-    """
+    """Extract canonical relations, attributes, and events from text."""
     if entity_map is not None:
         annotated_text = substitute_mentions(text, entity_map)
         valid_canonical_names = {normalize_entity_name(v) for v in entity_map.values() if v is not None}
@@ -188,20 +232,43 @@ def extract_triples(
     raw = call_llm(prompt, model=llm_model, max_tokens=3072)
     raw_facts = _parse_json_array(raw)
 
-    triples = []
-    for fact in raw_facts:
-        if not isinstance(fact, dict):
+    facts = []
+    for raw_fact in raw_facts:
+        if not isinstance(raw_fact, dict):
             continue
-        triple = _prepare_triple(fact)
-        if triple and _is_valid_triple(triple):
-            if triple["subject"] not in valid_canonical_names:
+        fact = _prepare_fact(raw_fact)
+        if not fact:
+            continue
+
+        if fact["type"] == "relation":
+            if fact["subject"] not in valid_canonical_names:
                 continue
-            if triple["subject"] in null_mentions or triple["object"] in null_mentions:
+            if fact["subject"] in null_mentions or fact["object"] in null_mentions:
                 continue
-            if source:
-                triple["source"] = source
-            triples.append(triple)
-    return triples
+        elif fact["type"] == "attribute":
+            if fact["subject"] not in valid_canonical_names:
+                continue
+            if fact["subject"] in null_mentions:
+                continue
+        elif fact["type"] == "event":
+            if fact["entity"] in null_mentions:
+                continue
+
+        if source:
+            fact["source"] = source
+        facts.append(fact)
+    return facts
+
+
+def extract_triples(
+    text: str,
+    entity_map: dict[str, str | None] | None = None,
+    source: str = "",
+    llm_model: str = "llama-3.3-70b-versatile",
+) -> list[dict]:
+    """Extract canonical triples from text using the resolved entities (legacy wrapper)."""
+    facts = extract_facts(text, entity_map, source, llm_model)
+    return [f for f in facts if f.get("type") == "relation"]
 
 
 def ingest_text(
@@ -236,29 +303,71 @@ def ingest_text(
         batch_text = " ".join(batch_sentences)
         history_sentences = sentences[max(0, i - 8) : i]
 
-        entity_map = resolve_entities(batch_text, history_sentences, llm_model=llm_model)
+        known_entities = set(graph.g.nodes)
+        entity_map = resolve_entities(
+            batch_text,
+            history_sentences,
+            known_entities=known_entities,
+            llm_model=llm_model,
+        )
 
         for canonical in entity_map.values():
             if canonical is not None:
                 all_resolved_entities.add(canonical)
 
         annotated_text = substitute_mentions(batch_text, entity_map)
-        triples = extract_triples(annotated_text, source=source, llm_model=llm_model)
+        facts = extract_facts(annotated_text, source=source, llm_model=llm_model)
 
-        for triple in triples:
+        for fact in facts:
             try:
-                graph.add_triple(
-                    subject=triple["subject"],
-                    relation=triple["relation"],
-                    obj=triple["object"],
-                    source=triple.get("source", source),
-                    condition=triple.get("condition", ""),
-                    negated=triple.get("negated", False),
-                    confidence=float(triple.get("confidence", 1.0)),
-                    statement_time=triple.get("statement_time", ""),
-                    temporal_aspect=triple.get("temporal_aspect", "PRESENT"),
-                )
-                total_triples += 1
+                fact_type = fact.get("type")
+                if fact_type == "relation":
+                    graph.add_relation(
+                        subject=fact["subject"],
+                        relation=fact["relation"],
+                        obj=fact["object"],
+                        source=fact.get("source", source),
+                        condition=fact.get("condition", ""),
+                        negated=fact.get("negated", False),
+                        confidence=float(fact.get("confidence", 1.0)),
+                        statement_time=fact.get("statement_time", ""),
+                        temporal_aspect=fact.get("temporal_aspect", "PRESENT"),
+                        aspect=fact.get("aspect", ""),
+                        modality=fact.get("modality", ""),
+                        quantifier=fact.get("quantifier", ""),
+                        evidentiality=fact.get("evidentiality", ""),
+                        speech_act=fact.get("speech_act", ""),
+                        causal=fact.get("causal", ""),
+                    )
+                    total_triples += 1
+                elif fact_type == "attribute":
+                    graph.add_attribute(
+                        subject=fact["subject"],
+                        key=fact["key"],
+                        value=fact["value"],
+                        source=fact.get("source", source),
+                        confidence=float(fact.get("confidence", 1.0)),
+                    )
+                    total_triples += 1
+                elif fact_type == "event":
+                    graph.add_event(
+                        event_id=fact["event_id"],
+                        role=fact["role"],
+                        entity=fact["entity"],
+                        source=fact.get("source", source),
+                        condition=fact.get("condition", ""),
+                        negated=fact.get("negated", False),
+                        confidence=float(fact.get("confidence", 1.0)),
+                        statement_time=fact.get("statement_time", ""),
+                        temporal_aspect=fact.get("temporal_aspect", "PRESENT"),
+                        aspect=fact.get("aspect", ""),
+                        modality=fact.get("modality", ""),
+                        quantifier=fact.get("quantifier", ""),
+                        evidentiality=fact.get("evidentiality", ""),
+                        speech_act=fact.get("speech_act", ""),
+                        causal=fact.get("causal", ""),
+                    )
+                    total_triples += 1
             except (KeyError, TypeError, ValueError):
                 continue
 
@@ -307,51 +416,75 @@ def _parse_entity_map(raw: str) -> dict[str, str | None]:
     return entity_map
 
 
-def _fix_passive(triple: dict) -> dict:
-    relation = triple.get("relation", "")
-    passive_markers = ["was ", "were "]
-    has_passive = False
-    matched_marker = ""
-    for marker in passive_markers:
-        if relation.startswith(marker):
-            has_passive = True
-            matched_marker = marker
-            break
-
-    if has_passive:
-        subj = triple["subject"]
-        obj = triple["object"]
-        triple["subject"] = obj
-        triple["object"] = subj
-
-        relation = relation[len(matched_marker):].strip()
-
-        if relation.endswith(" by"):
-            relation = relation[:-3].strip()
-        elif relation.startswith("by "):
-            relation = relation[3:].strip()
-
-        triple["relation"] = relation
-    return triple
+def _prepare_fact(fact: dict) -> dict | None:
+    fact_type = str(fact.get("type", "")).strip().lower()
+    if not fact_type:
+        fact_type = "relation"
+    if fact_type == "relation":
+        subject = normalize_entity_name(str(fact.get("subject", "") or ""))
+        relation = _normalize_relation(fact.get("relation", ""))
+        obj = normalize_entity_name(str(fact.get("object", "") or ""))
+        if not subject or not relation or not obj:
+            return None
+        return {
+            "type": "relation",
+            "subject": subject,
+            "relation": relation,
+            "object": obj,
+            "negated": bool(fact.get("negated", False)),
+            "condition": str(fact.get("condition", "") or "").strip(),
+            "confidence": float(fact.get("confidence", 1.0) or 1.0),
+            "statement_time": str(fact.get("statement_time", "") or "").strip(),
+            "temporal_aspect": str(fact.get("temporal_aspect", "PRESENT") or "PRESENT").strip().upper(),
+            "aspect": str(fact.get("aspect", "") or "").strip(),
+            "modality": str(fact.get("modality", "") or "").strip(),
+            "quantifier": str(fact.get("quantifier", "") or "").strip(),
+            "evidentiality": str(fact.get("evidentiality", "") or "").strip(),
+            "speech_act": str(fact.get("speech_act", "") or "").strip(),
+            "causal": str(fact.get("causal", "") or "").strip(),
+        }
+    elif fact_type == "attribute":
+        subject = normalize_entity_name(str(fact.get("subject", "") or ""))
+        key = normalize_entity_name(str(fact.get("key", "") or ""))
+        value = str(fact.get("value", "") or "").strip()
+        if not subject or not key or not value:
+            return None
+        return {
+            "type": "attribute",
+            "subject": subject,
+            "key": key,
+            "value": value,
+            "confidence": float(fact.get("confidence", 1.0) or 1.0),
+        }
+    elif fact_type == "event":
+        event_id = normalize_entity_name(str(fact.get("event_id", "") or ""))
+        role = normalize_entity_name(str(fact.get("role", "") or ""))
+        entity = normalize_entity_name(str(fact.get("entity", "") or ""))
+        if not event_id or not role or not entity:
+            return None
+        return {
+            "type": "event",
+            "event_id": event_id,
+            "role": role,
+            "entity": entity,
+            "negated": bool(fact.get("negated", False)),
+            "condition": str(fact.get("condition", "") or "").strip(),
+            "confidence": float(fact.get("confidence", 1.0) or 1.0),
+            "statement_time": str(fact.get("statement_time", "") or "").strip(),
+            "temporal_aspect": str(fact.get("temporal_aspect", "PRESENT") or "PRESENT").strip().upper(),
+            "aspect": str(fact.get("aspect", "") or "").strip(),
+            "modality": str(fact.get("modality", "") or "").strip(),
+            "quantifier": str(fact.get("quantifier", "") or "").strip(),
+            "evidentiality": str(fact.get("evidentiality", "") or "").strip(),
+            "speech_act": str(fact.get("speech_act", "") or "").strip(),
+            "causal": str(fact.get("causal", "") or "").strip(),
+        }
+    return None
 
 
 def _prepare_triple(fact: dict) -> dict | None:
-    subject = normalize_entity_name(str(fact.get("subject", "") or ""))
-    relation = _normalize_relation(fact.get("relation", ""))
-    obj = normalize_entity_name(str(fact.get("object", "") or ""))
-    if not subject or not relation or not obj:
-        return None
-    triple = {
-        "subject": subject,
-        "relation": relation,
-        "object": obj,
-        "negated": bool(fact.get("negated", False)),
-        "condition": str(fact.get("condition", "") or "").strip(),
-        "confidence": float(fact.get("confidence", 1.0) or 1.0),
-        "statement_time": str(fact.get("statement_time", "") or "").strip(),
-        "temporal_aspect": str(fact.get("temporal_aspect", "PRESENT") or "PRESENT").strip().upper(),
-    }
-    return _fix_passive(triple)
+    prepared = _prepare_fact({**fact, "type": "relation"})
+    return prepared
 
 
 def _normalize_relation(relation: str) -> str:

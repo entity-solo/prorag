@@ -23,7 +23,62 @@ graph TD
     F --> G[Concise Answer]
 ```
 
-### 1. Ingestion Pipeline
+---
+
+## Detailed Step-by-Step Function Guide
+
+### 1. Ingestion Phase (Data In)
+
+The ingestion pipeline transforms raw text files or strings into structured graph facts using the following sequence of functions in [extractor.py](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py):
+
+1. **[ingest_file()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py#L294):** 
+   - Entry point for file ingestion.
+   - Reads the full text of the file and calls `ingest_text()` directly, skipping character-based chunking.
+2. **[ingest_text()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py#L237):** 
+   - Splits text into sentences using regex `(?<=[.!?\n])\s+`.
+   - Groups sentences into batches of size 8.
+   - For each batch, computes preceding sentences (up to 8) as history and calls `resolve_entities()`.
+   - Annotates the text via `substitute_mentions()` and extracts facts via `extract_facts()`.
+   - Routes facts to the database using `graph.add_relation()`, `graph.add_attribute()`, or `graph.add_event()`.
+3. **[resolve_entities()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py#L110):** 
+   - Resolution starts with no context.
+   - If any mention maps to `null` (None), it retries with context (up to 2 retries, prepending 4 preceding sentences from history per retry).
+   - Supports backward compatibility: if a `set` is passed as the second argument, it behaves as the old `entity_registry` candidate list without retrying.
+4. **[substitute_mentions()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py#L157):** 
+   - Replaces resolved mentions in the text with `[canonical_name]`.
+   - Sorts mentions by length descending to prevent substring collisions.
+   - Uses unique placeholders (`___ENTITY_PLACEHOLDER_{i}___`) to prevent nested bracket errors (e.g. replacing "Steve" inside `[steve jobs]` to become `[[steve] jobs]`).
+5. **[extract_facts()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py#L178):** 
+   - Prompts the LLM with annotated text to extract relations, attributes, and events between bracketed names.
+   - Filters facts: drops facts where the subject is not a resolved canonical entity, or if subject/object belongs to a mention that resolved to `null`.
+6. **[_prepare_fact()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py#L351):** 
+   - Normalizes and formats the extracted fact based on its type (`relation`, `attribute`, or `event`). Parses negation, confidence, statement time, temporal aspect, and other metadata fields.
+7. **[_is_valid_triple()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/extractor.py#L370):** 
+   - Standard validator that checks that the subject, relation, and object are not empty.
+
+### 2. Retrieval & QA Phase (Query Out)
+
+The retrieval and QA pipeline processes user questions and synthesizes grounded answers using the following sequence of functions in [pipeline.py](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/pipeline.py):
+
+1. **[answer()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/pipeline.py#L60):** 
+   - High-level QA entry point.
+   - Calls `retrieve_evidence()` to search and select graph facts.
+   - Formats facts (including rich metadata suffixes like aspect, modality, etc.) and their corresponding raw source text chunks via `_format_context()`.
+   - Feeds formatted context to the LLM via `_ANSWER_PROMPT` to synthesize a concise answer.
+2. **[retrieve_evidence()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/pipeline.py#L89):** 
+   - Identifies the question slot category via `detect_question_slot()`.
+   - Extracts seed entities via lexical overlap (matching both primary name and aliases) and semantic vector matching (`_detect_seed_entities()`).
+   - Retrieves candidate graph triples using vector search (`graph.query_vector()`) or keyword search.
+   - Scores and reranks triples based on semantic similarity, slot matching, aspect matching, and contradiction penalties.
+   - Traces path connections and returns the top-k evidence triples.
+3. **[detect_question_slot()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/pipeline.py#L125):** 
+   - Routes questions into one of the 5W1H categories using prefix matching or `_SLOT_HINTS`.
+4. **[detect_question_aspect()](file:///c:/Users/hanng/Downloads/prorag-repo/prorag/pipeline.py#L225):** 
+   - Evaluates keywords (`plan`, `did`, `was`) to set the question's temporal aspect (PAST/PRESENT/FUTURE).
+
+---
+
+### Ingestion Pipeline
 
 Instead of arbitrary character-based chunking, ProRAG uses semantic sentence-level batching combined with a multi-step entity resolution and relation extraction pipeline.
 
@@ -32,10 +87,8 @@ Instead of arbitrary character-based chunking, ProRAG uses semantic sentence-lev
   For each batch, entity resolution is performed using the `_ENTITY_RESOLUTION_PROMPT`. If any mention fails to resolve (returns `null`), the system enters a retry loop (max 2 retries). On each retry, it prepends the preceding `N` sentences from history (4 sentences per retry) as background context to help resolve ambiguous pronouns ("he", "it", "they") or generic references ("the company") to their canonical names.
 * **Mention Substitution & Annotation:**
   Resolved mentions are replaced in the text with `[canonical_name]`. Mentions are sorted by length descending to prevent replacing substrings prematurely. To avoid nested replacements (e.g. replacing "Steve" inside `[steve jobs]`), it temporarily swaps mentions with unique placeholders before writing out the final bracketed text.
-* **Annotated Relation Extraction:**
-  The relation extraction prompt (`_EXTRACT_PROMPT`) receives the annotated text. The LLM only needs to identify relationship verbs between bracketed entities rather than guessing names. If a subject or object was mapped to `null` in the entity map, it is dropped programmatically during validation.
-* **Passive Voice Safety Net:**
-  Even when instructed to output active voice, LLMs occasionally return passive voice relations (e.g., `"was released by"`). The `_fix_passive()` helper catches these patterns in Python, swaps the subject and object, strips the passive voice markers, and normalizes the relation to active voice before graph write.
+* **Annotated Relation & Fact Extraction:**
+  The fact extraction prompt receives the annotated text. The LLM only needs to identify relations, attributes, or events between bracketed entities rather than guessing names. If a subject or object was mapped to `null` in the entity map, it is dropped programmatically during validation.
 
 ### 2. Graph Storage
 

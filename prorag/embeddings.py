@@ -41,8 +41,14 @@ class EmbeddingStore:
         except ImportError:
             self._use_fallback = True
             return
+
+        import os
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_path = os.path.join(repo_root, "models", self._model_name)
+        load_path = local_path if os.path.exists(local_path) else self._model_name
+
         try:
-            self._model = SentenceTransformer(self._model_name)
+            self._model = SentenceTransformer(load_path)
         except Exception:
             self._use_fallback = True
 
