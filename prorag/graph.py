@@ -38,6 +38,12 @@ class ProRAGGraph:
 
     def __init__(self) -> None:
         self.g = nx.MultiDiGraph()
+        self.chunks: dict[str, str] = {}
+
+    def add_chunk(self, source: str, text: str) -> None:
+        """Add a raw text chunk to the graph's storage linked to its source/chunk ID."""
+        if source and text:
+            self.chunks[source] = text.strip()
 
     def add_triple(
         self,
@@ -368,12 +374,13 @@ class ProRAGGraph:
             if "meta" in edge:
                 edge["meta"] = asdict(edge["meta"])
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"graph": data}, handle, ensure_ascii=False)
+            json.dump({"graph": data, "chunks": self.chunks}, handle, ensure_ascii=False)
 
     def load(self, path: str) -> None:
         with open(path, encoding="utf-8") as handle:
             raw = json.load(handle)
         graph_data = raw["graph"] if isinstance(raw, dict) and "graph" in raw else raw
+        self.chunks = raw.get("chunks", {}) if isinstance(raw, dict) else {}
         edge_key = "links" if "links" in graph_data else "edges"
         for node in graph_data["nodes"]:
             if "meta" in node:

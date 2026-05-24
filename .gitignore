@@ -27,3 +27,8 @@ results/
 # JSON files (except pyproject.toml related)
 *.json
 !pyproject.toml
+
+# Scratch outputs
+scratch_raw_output.txt
+scratch_raw_output_debug.txt
+

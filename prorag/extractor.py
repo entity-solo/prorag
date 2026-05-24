@@ -14,11 +14,12 @@ from .llm import call_llm
 _ENTITY_RESOLUTION_PROMPT = """\
 You are an entity resolution assistant.
 
-Find ALL noun phrases, pronouns, and references in the text.
+Find ALL noun phrases, pronouns, references, and descriptive details (such as clothing items, physical characteristics, specific events, and objects) in the text.
 Map each mention to its canonical entity name.
 
 Rules:
 - Named entities (people, places, orgs, products, dates, numbers): use the most complete and specific form.
+- Physical objects, clothing, and descriptive details (e.g. "black turtleneck", "blue jeans", "iphone launch event", "steve jobs's shirt"): Treat them as distinct entities if they carry descriptive meaning. Do NOT discard or map them to null.
 - Pronouns (he, she, it, they, him, her, "ông", "cô", "họ", "anh", "chị", ...): resolve to the entity they refer to in order of appearance.
 - Generic references ("the company", "the device", "công ty này", "tổ chức đó", ...): resolve to the specific entity they refer to.
 - If a mention refers to a known entity from the list below: use that exact known entity name.
@@ -46,11 +47,8 @@ _EXTRACT_PROMPT = """\
 You are a knowledge graph extractor.
 
 Extract factual relations between entities from the text.
-Use ONLY the canonical entity names provided in the entity map below.
-Do not use any mention that maps to null.
-
-Entity map:
-{entity_map}
+The text contains annotated canonical entities enclosed in square brackets, like [entity name].
+Use ONLY these annotated entities as subjects and objects. Do not extract relations for any text not marked as an entity.
 
 Text:
 \"\"\"
@@ -58,15 +56,14 @@ Text:
 \"\"\"
 
 Rules:
-- Extract only explicit facts. Do not invent facts.
-- Subject and object must be canonical names from the entity map.
-- Skip any fact where subject or object is null or not in the entity map.
+- Extract all explicit facts, including very minor, secondary, or seemingly trivial details (e.g., clothing items worn by individuals, specific actions during an event, physical attributes, small descriptive facts, relationships between objects).
+- Subject and object must be exactly one of the annotated canonical entity names from the text (without the square brackets).
 - Keep the same language as the input.
-- Decompose complex sentences into atomic triples (e.g., "Apple, founded by Steve Jobs in 1976, is..." becomes two triples: Jobs founded Apple in 1976, and Apple is...).
+- Decompose complex sentences into atomic triples (e.g., "[apple], founded by [steve jobs] in [1976], is..." becomes: subject: "steve jobs", relation: "founded", object: "apple"; subject: "steve jobs", relation: "founded in", object: "1976"; subject: "apple", relation: "is"...).
 - Normalize passive voice to active voice: If a relation in the text is passive (e.g., "A was released by B", "A được phát triển bởi B"), rewrite it in the active voice by swapping the subject and object (e.g. subject: "B", relation: "released", object: "A").
 - Separate event context, speech/assertion time, and temporal aspect:
-  - "condition": Context/precondition under which the fact is valid (e.g., "if stock rises").
-  - "statement_time": Exact date or time when this statement was asserted, spoken, or published in the document (e.g., "October 2012", "2026-05-23"). Leave as empty string if not specified.
+  - "condition": Context/precondition under which the fact is valid (e.g., "if stock rises", "at the 2007 iphone launch").
+  - "statement_time": Exact date or time when this statement was asserted, spoken, or published in the document. Leave as empty string if not specified.
   - "temporal_aspect": Choose exactly one of "PAST" (events completed in the past), "PRESENT" (current states or general facts), or "FUTURE" (plans, projections, or future predictions).
 - For negations, extract the statement affirmatively and set "negated" to true.
 
@@ -89,19 +86,211 @@ JSON array:"""
 
 def resolve_entities(
     text: str,
-    entity_registry: set[str],
+    history_sentences: list[str] | set[str] | None = None,
     llm_model: str = "llama-3.3-70b-versatile",
 ) -> dict[str, str | None]:
     """Find all mentions in text and map each to a canonical entity name.
 
-    Uses entity_registry (known entities from previous chunks) as candidates.
-    Returns entity_map {mention -> canonical_name or None if ambiguous}.
+    If history_sentences is a set (for backward compatibility), it is treated as entity_registry.
+    Otherwise, lazy context expansion is applied on mention resolution failure (resolves to null/None).
     """
-    prompt = _ENTITY_RESOLUTION_PROMPT.format(
-        known_entities=json.dumps(sorted(entity_registry), ensure_ascii=False),
-        text=text.strip(),
+    is_old_registry = isinstance(history_sentences, set)
+
+    if is_old_registry:
+        known_str = json.dumps(sorted(history_sentences), ensure_ascii=False)
+        prompt = _ENTITY_RESOLUTION_PROMPT.format(
+            known_entities=known_str,
+            text=text.strip(),
+        )
+        raw = call_llm(prompt, model=llm_model, max_tokens=1024)
+        return _parse_entity_map(raw)
+
+    history_list = list(history_sentences) if history_sentences else []
+    max_retries = 2
+    expand_sentences = 4
+
+    for retry in range(max_retries + 1):
+        if retry == 0:
+            text_input = text.strip()
+        else:
+            n_sentences = retry * expand_sentences
+            context_part = " ".join(history_list[-n_sentences:])
+            text_input = (
+                f"Previous context (for reference only, do NOT resolve entities from this part):\n"
+                f"\"\"\"\n{context_part}\n\"\"\"\n\n"
+                f"Text:\n{text.strip()}"
+            )
+
+        prompt = _ENTITY_RESOLUTION_PROMPT.format(
+            known_entities="[]",
+            text=text_input,
+        )
+        raw = call_llm(prompt, model=llm_model, max_tokens=1024)
+        entity_map = _parse_entity_map(raw)
+
+        has_null = any(v is None for v in entity_map.values())
+        if not has_null or not history_list or retry == max_retries:
+            return entity_map
+
+    return {}
+
+
+def substitute_mentions(text: str, entity_map: dict[str, str | None]) -> str:
+    """Replace resolved mentions with [canonical name] in text.
+
+    Sorts by length descending to avoid replacing substrings first.
+    Uses placeholders to prevent nested replacements of overlapping entities.
+    """
+    resolved = {k: v for k, v in entity_map.items() if v is not None}
+    sorted_mentions = sorted(resolved.keys(), key=len, reverse=True)
+
+    placeholders = {}
+    for i, mention in enumerate(sorted_mentions):
+        ph = f"___ENTITY_PLACEHOLDER_{i}___"
+        placeholders[ph] = resolved[mention]
+        text = text.replace(mention, ph)
+
+    for ph, canonical in placeholders.items():
+        text = text.replace(ph, f"[{canonical}]")
+
+    return text
+
+
+def extract_triples(
+    text: str,
+    entity_map: dict[str, str | None] | None = None,
+    source: str = "",
+    llm_model: str = "llama-3.3-70b-versatile",
+) -> list[dict]:
+    """Extract canonical triples from text using the resolved entities.
+
+    Accepts annotated text (containing square brackets like [canonical name]).
+    For backward compatibility, if entity_map is provided or if text is raw (no brackets),
+    it resolves entities first and substitutes them before extracting.
+    """
+    if entity_map is not None:
+        annotated_text = substitute_mentions(text, entity_map)
+        valid_canonical_names = {normalize_entity_name(v) for v in entity_map.values() if v is not None}
+        null_mentions = {normalize_entity_name(k) for k, v in entity_map.items() if v is None}
+    elif not re.search(r"\[.+?\]", text):
+        entity_map = resolve_entities(text, None, llm_model)
+        annotated_text = substitute_mentions(text, entity_map)
+        valid_canonical_names = {normalize_entity_name(v) for v in entity_map.values() if v is not None}
+        null_mentions = {normalize_entity_name(k) for k, v in entity_map.items() if v is None}
+    else:
+        annotated_text = text
+        valid_canonical_names = {normalize_entity_name(name) for name in re.findall(r"\[(.+?)\]", text)}
+        null_mentions = set()
+
+    prompt = _EXTRACT_PROMPT.format(
+        text=annotated_text.strip(),
     )
-    raw = call_llm(prompt, model=llm_model, max_tokens=1024)
+    raw = call_llm(prompt, model=llm_model, max_tokens=3072)
+    raw_facts = _parse_json_array(raw)
+
+    triples = []
+    for fact in raw_facts:
+        if not isinstance(fact, dict):
+            continue
+        triple = _prepare_triple(fact)
+        if triple and _is_valid_triple(triple):
+            if triple["subject"] not in valid_canonical_names:
+                continue
+            if triple["subject"] in null_mentions or triple["object"] in null_mentions:
+                continue
+            if source:
+                triple["source"] = source
+            triples.append(triple)
+    return triples
+
+
+def ingest_text(
+    text: str,
+    graph: ProRAGGraph,
+    entity_registry: set[str] | None = None,
+    source: str = "",
+    llm_model: str = "llama-3.3-70b-versatile",
+) -> tuple[int, set[str]]:
+    """Extract canonical triples from text and add them to the graph.
+
+    Reads by sentence batch (size 8) and performs lazy context expansion.
+    Returns (triple_count, updated_entity_registry) for backward compatibility.
+    """
+    if not source:
+        import hashlib
+        source = f"hash_{hashlib.md5(text.encode('utf-8')).hexdigest()[:12]}"
+
+    if hasattr(graph, "add_chunk"):
+        graph.add_chunk(source, text)
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", text) if s.strip()]
+    if not sentences:
+        return 0, entity_registry or set()
+
+    total_triples = 0
+    all_resolved_entities = set(entity_registry) if entity_registry is not None else set()
+
+    batch_size = 8
+    for i in range(0, len(sentences), batch_size):
+        batch_sentences = sentences[i : i + batch_size]
+        batch_text = " ".join(batch_sentences)
+        history_sentences = sentences[max(0, i - 8) : i]
+
+        entity_map = resolve_entities(batch_text, history_sentences, llm_model=llm_model)
+
+        for canonical in entity_map.values():
+            if canonical is not None:
+                all_resolved_entities.add(canonical)
+
+        annotated_text = substitute_mentions(batch_text, entity_map)
+        triples = extract_triples(annotated_text, source=source, llm_model=llm_model)
+
+        for triple in triples:
+            try:
+                graph.add_triple(
+                    subject=triple["subject"],
+                    relation=triple["relation"],
+                    obj=triple["object"],
+                    source=triple.get("source", source),
+                    condition=triple.get("condition", ""),
+                    negated=triple.get("negated", False),
+                    confidence=float(triple.get("confidence", 1.0)),
+                    statement_time=triple.get("statement_time", ""),
+                    temporal_aspect=triple.get("temporal_aspect", "PRESENT"),
+                )
+                total_triples += 1
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    return total_triples, all_resolved_entities
+
+
+def ingest_file(
+    path: str,
+    graph: ProRAGGraph,
+    source: str | None = None,
+    llm_model: str = "llama-3.3-70b-versatile",
+    chunk_size: int = 1500,
+    overlap_sentences: int = 1,
+) -> int:
+    """Read a plain-text file and ingest all content directly."""
+    with open(path, encoding="utf-8") as handle:
+        content = handle.read()
+
+    chunk_source_id = source or path
+    count, _ = ingest_text(
+        content,
+        graph,
+        entity_registry=None,
+        source=chunk_source_id,
+        llm_model=llm_model,
+    )
+    return count
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_entity_map(raw: str) -> dict[str, str | None]:
     parsed = _parse_json_object(raw)
     raw_map = parsed.get("entities", {}) if parsed else {}
 
@@ -118,114 +307,37 @@ def resolve_entities(
     return entity_map
 
 
-def extract_triples(
-    text: str,
-    entity_map: dict[str, str | None] | None = None,
-    source: str = "",
-    llm_model: str = "llama-3.3-70b-versatile",
-) -> list[dict]:
-    """Extract canonical triples from text using the resolved entity map.
+def _fix_passive(triple: dict) -> dict:
+    relation = triple.get("relation", "")
+    passive_markers = ["was ", "were ", "được ", "bị "]
+    has_passive = False
+    matched_marker = ""
+    for marker in passive_markers:
+        if relation.startswith(marker):
+            has_passive = True
+            matched_marker = marker
+            break
 
-    If entity_map is not provided, resolve_entities is called first with an
-    empty registry (single-chunk usage, backward compatible).
-    """
-    if entity_map is None:
-        entity_map = resolve_entities(text, set(), llm_model)
+    if has_passive:
+        subj = triple["subject"]
+        obj = triple["object"]
+        triple["subject"] = obj
+        triple["object"] = subj
 
-    valid_map = {k: v for k, v in entity_map.items() if v is not None}
-    prompt = _EXTRACT_PROMPT.format(
-        entity_map=json.dumps(valid_map, ensure_ascii=False),
-        text=text.strip(),
-    )
-    raw = call_llm(prompt, model=llm_model, max_tokens=3072)
-    raw_facts = _parse_json_array(raw)
+        relation = relation[len(matched_marker):].strip()
 
-    triples = []
-    for fact in raw_facts:
-        if not isinstance(fact, dict):
-            continue
-        triple = _prepare_triple(fact)
-        if triple and _is_valid_triple(triple):
-            if source:
-                triple["source"] = source
-            triples.append(triple)
-    return triples
+        if relation.endswith(" by"):
+            relation = relation[:-3].strip()
+        elif relation.endswith(" bởi"):
+            relation = relation[:-4].strip()
+        elif relation.startswith("by "):
+            relation = relation[3:].strip()
+        elif relation.startswith("bởi "):
+            relation = relation[4:].strip()
 
+        triple["relation"] = relation
+    return triple
 
-def ingest_text(
-    text: str,
-    graph: ProRAGGraph,
-    entity_registry: set[str] | None = None,
-    source: str = "",
-    llm_model: str = "llama-3.3-70b-versatile",
-) -> tuple[int, set[str]]:
-    """Extract canonical triples from text and add them to the graph.
-
-    Returns (triple_count, updated_entity_registry).
-    entity_registry accumulates known canonical names across chunks.
-    """
-    if entity_registry is None:
-        entity_registry = set()
-
-    entity_map = resolve_entities(text, entity_registry, llm_model)
-
-    new_registry = entity_registry | {
-        v for v in entity_map.values() if v is not None
-    }
-
-    triples = extract_triples(text, entity_map, source=source, llm_model=llm_model)
-    for triple in triples:
-        try:
-            graph.add_triple(
-                subject=triple["subject"],
-                relation=triple["relation"],
-                obj=triple["object"],
-                source=triple.get("source", source),
-                condition=triple.get("condition", ""),
-                negated=triple.get("negated", False),
-                confidence=float(triple.get("confidence", 1.0)),
-                statement_time=triple.get("statement_time", ""),
-                temporal_aspect=triple.get("temporal_aspect", "PRESENT"),
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-
-    return len(triples), new_registry
-
-
-def ingest_file(
-    path: str,
-    graph: ProRAGGraph,
-    source: str | None = None,
-    llm_model: str = "llama-3.3-70b-versatile",
-    chunk_size: int = 1500,
-    overlap_sentences: int = 1,
-) -> int:
-    """Read a plain-text file and ingest all chunks.
-
-    Entity registry is propagated across chunks so cross-chunk references
-    (pronouns, generic refs) are resolved correctly.
-    """
-    with open(path, encoding="utf-8") as handle:
-        content = handle.read()
-
-    entity_registry: set[str] = set()
-    total = 0
-
-    for chunk in _chunk_text(content, chunk_size, overlap_sentences=overlap_sentences):
-        count, entity_registry = ingest_text(
-            chunk,
-            graph,
-            entity_registry,
-            source=source or path,
-            llm_model=llm_model,
-        )
-        total += count
-
-    return total
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _prepare_triple(fact: dict) -> dict | None:
     subject = normalize_entity_name(str(fact.get("subject", "") or ""))
@@ -233,7 +345,7 @@ def _prepare_triple(fact: dict) -> dict | None:
     obj = normalize_entity_name(str(fact.get("object", "") or ""))
     if not subject or not relation or not obj:
         return None
-    return {
+    triple = {
         "subject": subject,
         "relation": relation,
         "object": obj,
@@ -243,6 +355,7 @@ def _prepare_triple(fact: dict) -> dict | None:
         "statement_time": str(fact.get("statement_time", "") or "").strip(),
         "temporal_aspect": str(fact.get("temporal_aspect", "PRESENT") or "PRESENT").strip().upper(),
     }
+    return _fix_passive(triple)
 
 
 def _normalize_relation(relation: str) -> str:
@@ -254,12 +367,11 @@ def _is_valid_triple(fact: dict) -> bool:
         fact.get("subject")
         and fact.get("relation")
         and fact.get("object")
-        and not is_unresolved_reference(fact["subject"])
-        and not is_unresolved_reference(fact["object"])
     )
 
 
 def _parse_json_array(text: str) -> list[dict]:
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"^```[a-z]*\n?", "", text.strip())
     text = re.sub(r"\n?```$", "", text)
     try:
@@ -281,6 +393,7 @@ def _parse_json_array(text: str) -> list[dict]:
 
 
 def _parse_json_object(text: str) -> dict:
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"^```[a-z]*\n?", "", text.strip())
     text = re.sub(r"\n?```$", "", text)
     try:
@@ -298,39 +411,16 @@ def _parse_json_object(text: str) -> dict:
                 return value
         except json.JSONDecodeError:
             pass
+
+    entities = {}
+    for line in text.splitlines():
+        m = re.search(r'"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', line)
+        if m:
+            mention, canonical = m.group(1), m.group(2)
+            mention = mention.replace('\\"', '"')
+            canonical = canonical.replace('\\"', '"')
+            entities[mention] = canonical
+    if entities:
+        return {"entities": entities}
+
     return {}
-
-
-def _chunk_text(text: str, size: int, overlap_sentences: int = 1) -> list[str]:
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", text) if s.strip()]
-    if not sentences:
-        return []
-
-    chunks: list[str] = []
-    start = 0
-    overlap = max(0, overlap_sentences)
-
-    while start < len(sentences):
-        current: list[str] = []
-        current_length = 0
-        end = start
-
-        while end < len(sentences):
-            sentence = sentences[end]
-            extra = len(sentence) + (1 if current else 0)
-            if current and current_length + extra > size:
-                break
-            current.append(sentence)
-            current_length += extra
-            end += 1
-
-        if not current:
-            current = [sentences[start]]
-            end = start + 1
-
-        chunks.append(" ".join(current).strip())
-        if end >= len(sentences):
-            break
-        start = max(end - overlap, start + 1)
-
-    return chunks

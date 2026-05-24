@@ -64,7 +64,7 @@ def answer(
     max_context_triples: int = 60,
 ) -> dict:
     triples, _meta = retrieve_evidence(question, graph, top_k=max_context_triples)
-    context, sources, has_contradictions = _format_context(triples)
+    context, sources, has_contradictions = _format_context(triples, graph)
     if not context:
         return {
             "answer": "I don't have enough information to answer this.",
@@ -550,10 +550,11 @@ def _unique(values: list[str]) -> list[str]:
     return ordered
 
 
-def _format_context(triples: list[dict]) -> tuple[str, list[str], bool]:
+def _format_context(triples: list[dict], graph: ProRAGGraph | None = None) -> tuple[str, list[str], bool]:
     lines = []
     sources = []
     has_contradictions = False
+    unique_sources = set()
 
     for triple in triples:
         negation = "NOT " if triple.get("negated") else ""
@@ -565,6 +566,23 @@ def _format_context(triples: list[dict]) -> tuple[str, list[str], bool]:
             has_contradictions = True
             relation = f"CONTRADICTS {relation[12:]}"
         lines.append(f"- {triple['subject']} {negation}{relation} {triple['object']}{condition}{confidence_suffix}")
-        sources.extend(triple.get("sources", []))
+        
+        for src in triple.get("sources", []):
+            sources.append(src)
+            if graph and hasattr(graph, "chunks") and src in graph.chunks:
+                unique_sources.add(src)
 
-    return "\n".join(lines), sources, has_contradictions
+    formatted_triples = "\n".join(lines)
+    
+    if graph and hasattr(graph, "chunks") and unique_sources:
+        chunk_texts = [f"[{src}]: {graph.chunks[src]}" for src in sorted(unique_sources)]
+        formatted_chunks = "\n\n".join(chunk_texts)
+        context = f"""### Knowledge Graph Facts:
+{formatted_triples}
+
+### Relevant Detailed Text Chunks:
+{formatted_chunks}"""
+    else:
+        context = formatted_triples
+
+    return context, sources, has_contradictions

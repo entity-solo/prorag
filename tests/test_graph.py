@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from prorag.extractor import _chunk_text, extract_triples, ingest_text
+from prorag.extractor import extract_triples, ingest_text
 from prorag.graph import ProRAGGraph
 from prorag.pipeline import detect_question_slot, retrieve_evidence
 
@@ -89,20 +89,12 @@ def test_graph_rejects_unresolved_pronouns():
     assert graph.stats() == {"nodes": 0, "edges": 0}
 
 
-def test_chunk_text_has_sentence_overlap():
-    text = "Alpha launched Beta. It shipped in September. Customers liked it. Sales increased."
-    chunks = _chunk_text(text, size=45, overlap_sentences=1)
-    assert len(chunks) >= 2
-    assert "It shipped in September." in chunks[0]
-    assert "It shipped in September." in chunks[1]
-
-
 def test_extract_triples_resolves_pronoun_from_recent_entity():
     mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15", "It": "iphone 15", "September": "september"}}'
     mock_extract_response = """
     [
       {"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false, "confidence": 1.0},
-      {"subject": "iphone 15", "relation": "was announced in", "object": "september", "negated": false, "confidence": 1.0}
+      {"subject": "iphone 15", "relation": "announced in", "object": "september", "negated": false, "confidence": 1.0}
     ]
     """
     with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
@@ -121,32 +113,48 @@ def test_resolve_entities_basic():
     assert entity_map["the company"] == "openai"
 
 
-def test_cross_chunk_registry_propagates():
+def test_cross_sentence_lazy_context_propagates():
     from prorag.extractor import ingest_text
-    mock_entity_1 = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
-    mock_extract_1 = '[{"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false}]'
     
-    mock_entity_2 = '{"entities": {"It": "iphone 15", "September": "september"}}'
-    mock_extract_2 = '[{"subject": "iphone 15", "relation": "was announced in", "object": "september", "negated": false}]'
+    # We pass a text with 9 sentences so it gets split into 2 batches (size 8 and size 1).
+    text = (
+        "Apple released iPhone 15. "
+        "S2. S3. S4. S5. S6. S7. S8. "
+        "It was announced in September."
+    )
+    
+    mock_entity_1 = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
+    mock_extract_1 = '[{"subject": "apple", "relation": "released", "object": "iphone 15"}]'
+    
+    # Second batch (Sentence 9) has "It was announced in September."
+    # Since "It" resolves to null initially, it will retry with history.
+    # Retry 0: returns "It" -> null
+    mock_entity_2_try0 = '{"entities": {"It": null, "September": "september"}}'
+    # Retry 1: with preceding 4 sentences, resolves "It" to "iphone 15"
+    mock_entity_2_try1 = '{"entities": {"It": "iphone 15", "September": "september"}}'
+    mock_extract_2 = '[{"subject": "iphone 15", "relation": "announced in", "object": "september"}]'
     
     graph = ProRAGGraph()
-    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_1, mock_extract_1, mock_entity_2, mock_extract_2]) as mock_call:
-        count1, registry1 = ingest_text("Apple released iPhone 15.", graph, entity_registry=set())
-        assert registry1 == {"apple", "iphone 15"}
+    with patch("prorag.extractor.call_llm", side_effect=[
+        mock_entity_1, mock_extract_1, 
+        mock_entity_2_try0, mock_entity_2_try1, mock_extract_2
+    ]) as mock_call:
+        count, registry = ingest_text(text, graph)
         
-        count2, registry2 = ingest_text("It was announced in September.", graph, entity_registry=registry1)
-        assert registry2 == {"apple", "iphone 15", "september"}
-        
-        called_args = [call[0][0] for call in mock_call.call_args_list]
-        assert "apple" in called_args[2]
-        assert "iphone 15" in called_args[2]
+    assert "iphone 15" in graph.g.nodes
+    assert "september" in graph.g.nodes
+    
+    # Verify call arguments to make sure context was included
+    called_args = [call[0][0] for call in mock_call.call_args_list]
+    assert "Previous context" in called_args[3]
+    assert "S8." in called_args[3]
 
 
 def test_extract_triples_drops_unresolved_pronoun_fact():
     mock_entity_response = '{"entities": {"It": null, "September": "september"}}'
     mock_extract_response = """
     [
-      {"subject": "It", "relation": "was announced in", "object": "september", "negated": false, "confidence": 1.0}
+      {"subject": "It", "relation": "announced in", "object": "september", "negated": false, "confidence": 1.0}
     ]
     """
     with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
@@ -159,7 +167,7 @@ def test_ingest_text_full_pipeline_avoids_pronoun_nodes():
     mock_extract_response = """
     [
       {"subject": "apple", "relation": "released", "object": "iphone 15", "negated": false, "confidence": 1.0},
-      {"subject": "iphone 15", "relation": "was announced in", "object": "september", "negated": false, "confidence": 1.0}
+      {"subject": "iphone 15", "relation": "announced in", "object": "september", "negated": false, "confidence": 1.0}
     ]
     """
     graph = ProRAGGraph()
@@ -260,6 +268,61 @@ def test_extract_triples_normalizes_passive_voice():
     assert triples[0]["object"] == "iphone 15"
 
 
+def test_extract_triples_normalizes_passive_voice_fallback():
+    # Test passive voice auto-correction helper on LLM failure to follow instructions
+    mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
+    mock_extract_response = """
+    [
+      {"subject": "iphone 15", "relation": "was released by", "object": "apple", "negated": false}
+    ]
+    """
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_response, mock_extract_response]):
+        triples = extract_triples("iPhone 15 was released by Apple.")
+    assert len(triples) == 1
+    assert triples[0]["subject"] == "apple"
+    assert triples[0]["relation"] == "released"
+    assert triples[0]["object"] == "iphone 15"
+
+
+def test_fix_passive():
+    from prorag.extractor import _fix_passive
+    
+    # Test English passive voice with by
+    t1 = {"subject": "iphone 15", "relation": "was released by", "object": "apple"}
+    res1 = _fix_passive(t1)
+    assert res1["subject"] == "apple"
+    assert res1["object"] == "iphone 15"
+    assert res1["relation"] == "released"
+    
+    # Test Vietnamese passive voice with bởi
+    t2 = {"subject": "iphone 15", "relation": "được phát triển bởi", "object": "apple"}
+    res2 = _fix_passive(t2)
+    assert res2["subject"] == "apple"
+    assert res2["object"] == "iphone 15"
+    assert res2["relation"] == "phát triển"
+    
+    # Test passive voice prefix/suffix strip
+    t3 = {"subject": "a", "relation": "bị bắt bởi", "object": "b"}
+    res3 = _fix_passive(t3)
+    assert res3["subject"] == "b"
+    assert res3["object"] == "a"
+    assert res3["relation"] == "bắt"
+
+
+def test_substitute_mentions():
+    from prorag.extractor import substitute_mentions
+    
+    entity_map = {
+        "Steve Jobs": "steve jobs",
+        "Steve": "steve",
+        "Apple": "apple"
+    }
+    # Check that Steve inside Steve Jobs is not double-replaced
+    text = "Steve Jobs founded Apple. Steve was CEO."
+    annotated = substitute_mentions(text, entity_map)
+    assert annotated == "[steve jobs] founded [apple]. [steve] was CEO."
+
+
 def test_extract_triples_extracts_statement_time_and_aspect():
     mock_entity_response = '{"entities": {"Apple": "apple", "iPhone 16": "iphone 16"}}'
     mock_extract_response = """
@@ -285,4 +348,3 @@ def test_retrieve_evidence_prefers_matching_temporal_condition():
     
     triples_2, meta_2 = retrieve_evidence("Who is CEO of Apple in 2020?", graph, top_k=2)
     assert triples_2[0]["subject"] == "tim cook"
-

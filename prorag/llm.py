@@ -53,14 +53,18 @@ def _groq(prompt, model, max_tokens, system) -> str:
             return resp.choices[0].message.content or ""
         except Exception as e:
             err_str = str(e).lower()
-            if "429" in err_str or "rate limit" in err_str or "limit_reached" in err_str or "tp_limit_reached" in err_str or "rate_limit_exceeded" in err_str:
+            is_rate_limit = any(term in err_str for term in ("429", "rate limit", "limit_reached", "tp_limit_reached", "rate_limit_exceeded"))
+            is_conn_error = any(term in err_str for term in ("connection error", "connecterror", "10051", "unreachable network", "timeout"))
+            
+            if is_rate_limit or is_conn_error:
                 wait_time = (2 ** attempt) * 2
-                print(f"[Rate Limit] Groq rate limit hit. Waiting {wait_time}s before retry... (Error: {e})")
+                error_type = "Rate Limit" if is_rate_limit else "Connection Error"
+                print(f"[{error_type}] Groq call failed. Waiting {wait_time}s before retry... (Error: {e})")
                 time.sleep(wait_time)
             else:
                 raise e
 
-    raise RuntimeError("Failed to call Groq API after maximum retries due to rate limits.")
+    raise RuntimeError("Failed to call Groq API after maximum retries due to errors.")
 
 
 def _openai(prompt, model, max_tokens, system) -> str:
