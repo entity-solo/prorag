@@ -20,8 +20,8 @@ Map each mention to its canonical entity name.
 Rules:
 - Named entities (people, places, orgs, products, dates, numbers): use the most complete and specific form.
 - Physical objects, clothing, and descriptive details (e.g. "black turtleneck", "blue jeans", "iphone launch event", "steve jobs's shirt"): Treat them as distinct entities if they carry descriptive meaning. Do NOT discard or map them to null.
-- Pronouns (he, she, it, they, him, her, "ông", "cô", "họ", "anh", "chị", ...): resolve to the entity they refer to in order of appearance.
-- Generic references ("the company", "the device", "công ty này", "tổ chức đó", ...): resolve to the specific entity they refer to.
+- Pronouns (he, she, it, they, him, her, ...): resolve to the entity they refer to in order of appearance.
+- Generic references ("the company", "the device", ...): resolve to the specific entity they refer to.
 - If a mention refers to a known entity from the list below: use that exact known entity name.
 - If a mention is a new entity not in the known list: create a canonical name using the most complete form found in the text.
 - If a mention is ambiguous and cannot be confidently resolved: map to null.
@@ -60,7 +60,7 @@ Rules:
 - Subject and object must be exactly one of the annotated canonical entity names from the text (without the square brackets).
 - Keep the same language as the input.
 - Decompose complex sentences into atomic triples (e.g., "[apple], founded by [steve jobs] in [1976], is..." becomes: subject: "steve jobs", relation: "founded", object: "apple"; subject: "steve jobs", relation: "founded in", object: "1976"; subject: "apple", relation: "is"...).
-- Normalize passive voice to active voice: If a relation in the text is passive (e.g., "A was released by B", "A được phát triển bởi B"), rewrite it in the active voice by swapping the subject and object (e.g. subject: "B", relation: "released", object: "A").
+- Normalize passive voice to active voice: If a relation in the text is passive (e.g., "A was released by B"), rewrite it in the active voice by swapping the subject and object (e.g. subject: "B", relation: "released", object: "A").
 - Separate event context, speech/assertion time, and temporal aspect:
   - "condition": Context/precondition under which the fact is valid (e.g., "if stock rises", "at the 2007 iphone launch").
   - "statement_time": Exact date or time when this statement was asserted, spoken, or published in the document. Leave as empty string if not specified.
@@ -309,7 +309,7 @@ def _parse_entity_map(raw: str) -> dict[str, str | None]:
 
 def _fix_passive(triple: dict) -> dict:
     relation = triple.get("relation", "")
-    passive_markers = ["was ", "were ", "được ", "bị "]
+    passive_markers = ["was ", "were "]
     has_passive = False
     matched_marker = ""
     for marker in passive_markers:
@@ -328,12 +328,8 @@ def _fix_passive(triple: dict) -> dict:
 
         if relation.endswith(" by"):
             relation = relation[:-3].strip()
-        elif relation.endswith(" bởi"):
-            relation = relation[:-4].strip()
         elif relation.startswith("by "):
             relation = relation[3:].strip()
-        elif relation.startswith("bởi "):
-            relation = relation[4:].strip()
 
         triple["relation"] = relation
     return triple

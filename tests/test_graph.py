@@ -293,20 +293,6 @@ def test_fix_passive():
     assert res1["subject"] == "apple"
     assert res1["object"] == "iphone 15"
     assert res1["relation"] == "released"
-    
-    # Test Vietnamese passive voice with bởi
-    t2 = {"subject": "iphone 15", "relation": "được phát triển bởi", "object": "apple"}
-    res2 = _fix_passive(t2)
-    assert res2["subject"] == "apple"
-    assert res2["object"] == "iphone 15"
-    assert res2["relation"] == "phát triển"
-    
-    # Test passive voice prefix/suffix strip
-    t3 = {"subject": "a", "relation": "bị bắt bởi", "object": "b"}
-    res3 = _fix_passive(t3)
-    assert res3["subject"] == "b"
-    assert res3["object"] == "a"
-    assert res3["relation"] == "bắt"
 
 
 def test_substitute_mentions():

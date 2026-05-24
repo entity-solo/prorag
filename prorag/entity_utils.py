@@ -9,17 +9,14 @@ import re
 
 _PERSON_PRONOUNS = {
     "he", "him", "his", "she", "her", "hers",
-    "anh ay", "ong ay", "co ay", "ba ay", "anh ta", "co ta",
 }
 
 _NEUTRAL_PRONOUNS = {
     "it", "its", "this", "that", "this one", "that one",
-    "no", "cai nay", "cai do",
 }
 
 _PLURAL_PRONOUNS = {
     "they", "them", "their", "theirs", "these", "those",
-    "ho", "bon ho", "nhung nguoi nay",
 }
 
 _GENERIC_REFERENCES = {
@@ -34,9 +31,6 @@ _GENERIC_REFERENCES = {
     "the law", "this law", "that law",
     "the document", "this document", "that document",
     "the company itself", "the latter", "the former",
-    "cong ty nay", "cong ty do", "bo phim nay", "bo phim do",
-    "thiet bi nay", "thiet bi do", "san pham nay", "san pham do",
-    "dich vu nay", "dich vu do",
 }
 
 PRONOUN_REFERENCES = _PERSON_PRONOUNS | _NEUTRAL_PRONOUNS | _PLURAL_PRONOUNS
@@ -72,7 +66,7 @@ def is_person_like_entity(value: str) -> bool:
     text = normalize_entity_name(value)
     if not text or is_unresolved_reference(text):
         return False
-    if text.startswith(("mr ", "mrs ", "ms ", "dr ", "prof ", "ong ", "ba ", "co ", "anh ")):
+    if text.startswith(("mr ", "mrs ", "ms ", "dr ", "prof ")):
         return True
     tokens = [token for token in text.split() if token.isalpha()]
     return len(tokens) >= 2

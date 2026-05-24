@@ -31,13 +31,13 @@ Rules:
 _CONTRADICTIONS_NOTE = "\nNote: conflicting information exists - see sources."
 
 _SLOT_HINTS = {
-    "who": ("person", "people", "founder", "ceo", "president", "director", "author", "inventor", "actor", "ai", "nguoi nao"),
-    "what": ("what", "which", "name", "title", "product", "concept", "la gi", "ten gi"),
-    "when": ("when", "year", "date", "month", "day", "time", "born", "died", "released", "launched", "announced", "founded", "nam nao"),
-    "where": ("where", "location", "place", "country", "city", "headquarters", "born", "filmed", "located", "based", "o dau", "tai dau"),
-    "why": ("why", "reason", "because", "cause", "due", "tai sao", "vi sao"),
-    "how": ("how", "method", "process", "way", "approach", "the nao", "bang cach nao"),
-    "how_many": ("how many", "how much", "number of", "amount of", "count", "bao nhieu", "so luong"),
+    "who": ("person", "people", "founder", "ceo", "president", "director", "author", "inventor", "actor", "ai"),
+    "what": ("what", "which", "name", "title", "product", "concept"),
+    "when": ("when", "year", "date", "month", "day", "time", "born", "died", "released", "launched", "announced", "founded"),
+    "where": ("where", "location", "place", "country", "city", "headquarters", "born", "filmed", "located", "based"),
+    "why": ("why", "reason", "because", "cause", "due"),
+    "how": ("how", "method", "process", "way", "approach"),
+    "how_many": ("how many", "how much", "number of", "amount of", "count"),
 }
 
 _SLOT_RELATION_HINTS = {
@@ -53,7 +53,6 @@ _SLOT_RELATION_HINTS = {
 _QUESTION_WORDS = {
     "who", "what", "when", "where", "why", "how", "which", "whom", "whose",
     "is", "are", "was", "were", "do", "does", "did", "can", "could", "would", "should",
-    "ai", "cai", "gi", "la", "khi", "o", "tai", "dau", "tai sao", "vi sao", "nao", "bao", "nhieu",
 }
 
 
@@ -126,17 +125,17 @@ def detect_question_slot(question: str) -> str:
     q = normalize_entity_name(question)
     if not q:
         return "what"
-    if any(phrase in q for phrase in ("how many", "how much", "number of", "bao nhieu", "so luong")):
+    if any(phrase in q for phrase in ("how many", "how much", "number of")):
         return "how_many"
-    if any(q.startswith(prefix) for prefix in ("who", "ai", "whom")):
+    if any(q.startswith(prefix) for prefix in ("who", "whom")):
         return "who"
-    if any(q.startswith(prefix) for prefix in ("when", "khi", "nam nao", "ngay nao")):
+    if q.startswith("when"):
         return "when"
-    if any(q.startswith(prefix) for prefix in ("where", "o dau", "tai dau", "noi nao")):
+    if q.startswith("where"):
         return "where"
-    if any(q.startswith(prefix) for prefix in ("why", "tai sao", "vi sao")):
+    if q.startswith("why"):
         return "why"
-    if any(q.startswith(prefix) for prefix in ("how", "the nao", "bang cach nao", "ra sao")):
+    if q.startswith("how"):
         return "how"
 
     scores = {slot: 0 for slot in _SLOT_HINTS}
@@ -228,9 +227,9 @@ def _retrieve_candidate_triples(
 
 def detect_question_aspect(question: str) -> str:
     q = question.lower()
-    if any(word in q for word in ("kế hoạch", "dự kiến", "tương lai", "plan", "predict", "forecast", "will", "would")):
+    if any(word in q for word in ("plan", "predict", "forecast", "will", "would")):
         return "FUTURE"
-    if any(word in q for word in ("đã", "từng", "quá khứ", "did", "was", "were", "happened")):
+    if any(word in q for word in ("did", "was", "were", "happened")):
         return "PAST"
     return "PRESENT"
 
