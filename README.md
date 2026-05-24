@@ -13,13 +13,13 @@ ProRAG uses a two-phase architecture: **Grounded Knowledge Graph Ingestion** and
 ```mermaid
 graph TD
     %% Ingestion Flow
-    A[Raw Text / File] --> B[Ingestion Pipeline <br/> - Sentence Batching <br/> - Lazy Context ER <br/> - Mention Annotation]
-    B --> C[(ProRAG Graph Database)]
+    A[Raw Text / File] --> B[Ingestion Pipeline <br/> - Sentence Batching <br/> - Lazy Context ER & Mention Annotation <br/> - Fact Extraction & Routing <br/> Relations / Attributes / Events]
+    B --> C[(ProRAG Graph Database <br/> - Known Entities & Aliases <br/> - Rich Edge Metadata)]
 
     %% Query Flow
-    D[User Question / Query] --> E[Evidence Retrieval <br/> - Semantic + Keyword Search <br/> - Evidence Path Reranking]
+    D[User Question / Query] --> E[Evidence Retrieval <br/> - Seed Entity & Alias Matching <br/> - Semantic + Keyword Search <br/> - Evidence Path Reranking]
     C --> E
-    E --> F[QA Synthesis LLM Call]
+    E --> F[QA Synthesis LLM Call <br/> with Edge Metadata Suffixes]
     F --> G[Concise Answer]
 ```
 
