@@ -35,7 +35,7 @@ Instead of arbitrary character-based chunking, ProRAG uses semantic sentence-lev
 * **Annotated Relation Extraction:**
   The relation extraction prompt (`_EXTRACT_PROMPT`) receives the annotated text. The LLM only needs to identify relationship verbs between bracketed entities rather than guessing names. If a subject or object was mapped to `null` in the entity map, it is dropped programmatically during validation.
 * **Passive Voice Safety Net:**
-  Even when instructed to output active voice, LLMs occasionally return passive voice relations (e.g., `"was released by"` or `"được phát triển bởi"`). The `_fix_passive()` helper catches these patterns in Python, swaps the subject and object, strips the passive voice markers, and normalizes the relation to active voice before graph write.
+  Even when instructed to output active voice, LLMs occasionally return passive voice relations (e.g., `"was released by"`). The `_fix_passive()` helper catches these patterns in Python, swaps the subject and object, strips the passive voice markers, and normalizes the relation to active voice before graph write.
 
 ### 2. Graph Storage
 
