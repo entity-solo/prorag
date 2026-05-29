@@ -5,11 +5,7 @@ It monkey-patches older retrieval behavior and does not reflect the current
 entity-first retrieval pipeline used by `ProRAG.ask()`.
 """
 
-import os
-import time
-import re
 from prorag import ProRAG
-from prorag.graph import ProRAGGraph
 from prorag.pipeline import _keywords_from_question
 import prorag.pipeline
 from prorag.llm import call_llm

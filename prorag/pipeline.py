@@ -10,15 +10,19 @@ from .detector import _keywords_from_question
 from .entity_utils import is_person_like_entity, normalize_entity_name
 from .graph import ProRAGGraph
 from .llm import call_llm
+from .modes import QualityMode, get_mode_config
 
 _ANSWER_PROMPT = """\
 You are a precise question-answering assistant.
 Answer the question using ONLY the knowledge graph context below.
 
 Rules:
-1. Give a concise answer.
-2. Do not invent facts.
-3. If the context is insufficient, say "I don't have enough information to answer this."
+1. Use Graph Facts as the primary evidence.
+2. Use Source Snippets only to verify or disambiguate Graph Facts when they are present.
+3. Provide a highly concise, short-phrase answer (e.g. only the name, date, or "yes"/"no").
+4. Do NOT write full sentences or conversational responses.
+5. Do not invent facts.
+6. If the graph facts are insufficient, say "I don't have enough information to answer this."
 
 ## Knowledge Graph Context
 {context}
@@ -61,9 +65,18 @@ def answer(
     graph: ProRAGGraph,
     llm_model: str = "llama-3.3-70b-versatile",
     max_context_triples: int = 60,
+    include_source_text: bool = False,
+    max_source_chars: int = 1200,
+    quality_mode: QualityMode | str = "balanced",
 ) -> dict:
+    mode_config = get_mode_config(quality_mode)
     triples, _meta = retrieve_evidence(question, graph, top_k=max_context_triples)
-    context, sources, has_contradictions = _format_context(triples, graph)
+    context, sources, has_contradictions = _format_context(
+        triples,
+        graph,
+        include_source_text=include_source_text,
+        max_source_chars=max_source_chars,
+    )
     if not context:
         return {
             "answer": "I don't have enough information to answer this.",
@@ -73,7 +86,15 @@ def answer(
         }
 
     prompt = _ANSWER_PROMPT.format(context=context, question=question)
-    answer_text = call_llm(prompt, model=llm_model, max_tokens=1024)
+    answer_text = call_llm(prompt, model=llm_model, max_tokens=mode_config.answer_max_tokens)
+    
+    # Strip <think>...</think> tags if present
+    answer_text = re.sub(r"(?is)<think>.*?</think>", "", answer_text)
+    if "<think>" in answer_text.lower():
+        # Handle truncated thinking blocks
+        answer_text = re.sub(r"(?is)<think>.*", "", answer_text)
+    answer_text = answer_text.strip()
+
     if has_contradictions:
         answer_text += _CONTRADICTIONS_NOTE
 
@@ -565,7 +586,13 @@ def _unique(values: list[str]) -> list[str]:
     return ordered
 
 
-def _format_context(triples: list[dict], graph: ProRAGGraph | None = None) -> tuple[str, list[str], bool]:
+def _format_context(
+    triples: list[dict],
+    graph: ProRAGGraph | None = None,
+    *,
+    include_source_text: bool = False,
+    max_source_chars: int = 1200,
+) -> tuple[str, list[str], bool]:
     lines = []
     sources = []
     has_contradictions = False
@@ -607,16 +634,30 @@ def _format_context(triples: list[dict], graph: ProRAGGraph | None = None) -> tu
                 unique_sources.add(src)
 
     formatted_triples = "\n".join(lines)
+    context = formatted_triples
+    if include_source_text and graph and hasattr(graph, "chunks") and unique_sources:
+        snippets = []
+        remaining_chars = max(0, max_source_chars)
+        for src in sorted(unique_sources):
+            if remaining_chars <= 0:
+                break
+            chunk_text = graph.chunks.get(src, "").strip()
+            if not chunk_text:
+                continue
+            normalized_text = re.sub(r"\s+", " ", chunk_text)
+            excerpt_len = min(600, remaining_chars)
+            excerpt = normalized_text[:excerpt_len].rstrip()
+            if len(normalized_text) > excerpt_len:
+                excerpt += "..."
+            snippets.append(f"[{src}] {excerpt}")
+            remaining_chars -= len(excerpt)
 
-    if graph and hasattr(graph, "chunks") and unique_sources:
-        chunk_texts = [f"[{src}]: {graph.chunks[src]}" for src in sorted(unique_sources)]
-        formatted_chunks = "\n\n".join(chunk_texts)
-        context = f"""### Knowledge Graph Facts:
-{formatted_triples}
-
-### Relevant Detailed Text Chunks:
-{formatted_chunks}"""
-    else:
-        context = formatted_triples
+        if snippets:
+            context = (
+                "### Graph Facts\n"
+                f"{formatted_triples}\n\n"
+                "### Source Snippets (supporting only)\n"
+                + "\n".join(snippets)
+            )
 
     return context, sources, has_contradictions

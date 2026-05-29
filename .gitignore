@@ -9,8 +9,10 @@ build/
 .venv/
 venv/
 .pytest_cache/
+.pytest_tmp/
 .ruff_cache/
 .mypy_cache/
+.prorag_cache/
 *.egg
 MANIFEST
 htmlcov/
@@ -31,4 +33,3 @@ results/
 # Scratch outputs
 scratch_raw_output.txt
 scratch_raw_output_debug.txt
-

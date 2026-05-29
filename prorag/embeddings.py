@@ -38,6 +38,8 @@ class EmbeddingStore:
             return
         try:
             from sentence_transformers import SentenceTransformer
+            import torch
+            torch.set_num_threads(1)
         except ImportError:
             self._use_fallback = True
             return

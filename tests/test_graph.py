@@ -3,7 +3,6 @@ Unit tests for the minimal ProRAG runtime.
 """
 
 from unittest.mock import patch
-from pathlib import Path
 
 import pytest
 
@@ -41,10 +40,8 @@ def test_stats(graph):
     assert stats["edges"] > 0
 
 
-def test_persistence(graph):
-    temp_dir = Path("C:/tmp")
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    path = temp_dir / "prorag_test_graph.json"
+def test_persistence(graph, tmp_path):
+    path = tmp_path / "prorag_test_graph.json"
     graph.save(str(path))
     restored = ProRAGGraph()
     restored.load(str(path))
@@ -150,6 +147,39 @@ def test_resolve_entities_with_known_entities():
     assert '"iphone"' in called_prompt
 
 
+def test_quality_mode_controls_entity_tokens():
+    from prorag.extractor import resolve_entities
+
+    mock_response = '{"entities": {"Apple": "apple"}}'
+
+    with patch("prorag.extractor.call_llm", return_value=mock_response) as mock_call:
+        resolve_entities("Apple released iPhone.", quality_mode="cheap")
+
+    assert mock_call.call_args.kwargs["max_tokens"] == 1024
+
+    with patch("prorag.extractor.call_llm", return_value=mock_response) as mock_call:
+        resolve_entities("Apple released iPhone.", quality_mode="quality")
+
+    assert mock_call.call_args.kwargs["max_tokens"] == 4096
+
+
+def test_llm_cache_reuses_identical_calls(tmp_path, monkeypatch):
+    from prorag.llm import call_llm
+
+    cache_path = tmp_path / "llm_cache.json"
+    monkeypatch.setenv("PRORAG_LLM_PROVIDER", "groq")
+    monkeypatch.setenv("PRORAG_LLM_CACHE", "1")
+    monkeypatch.setenv("PRORAG_LLM_CACHE_PATH", str(cache_path))
+
+    with patch("prorag.llm._groq", return_value="cached response") as mock_provider:
+        first = call_llm("same prompt", model="test-model", max_tokens=32)
+        second = call_llm("same prompt", model="test-model", max_tokens=32)
+
+    assert first == "cached response"
+    assert second == "cached response"
+    assert mock_provider.call_count == 1
+
+
 def test_extract_facts_mixed():
     from prorag.extractor import extract_facts
     
@@ -223,41 +253,37 @@ def test_resolve_entities_basic():
     assert entity_map["the company"] == "openai"
 
 
-def test_cross_sentence_lazy_context_propagates():
+def test_cross_sentence_full_context_entity_resolution():
     from prorag.extractor import ingest_text
-    
-    # We pass a text with 9 sentences so it gets split into 2 batches (size 8 and size 1).
+
     text = (
         "Apple released iPhone 15. "
         "S2. S3. S4. S5. S6. S7. S8. "
         "It was announced in September."
     )
-    
-    mock_entity_1 = '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15"}}'
-    mock_extract_1 = '[{"subject": "apple", "relation": "released", "object": "iphone 15"}]'
-    
-    # Second batch (Sentence 9) has "It was announced in September."
-    # Since "It" resolves to null initially, it will retry with history.
-    # Retry 0: returns "It" -> null
-    mock_entity_2_try0 = '{"entities": {"It": null, "September": "september"}}'
-    # Retry 1: with preceding 4 sentences, resolves "It" to "iphone 15"
-    mock_entity_2_try1 = '{"entities": {"It": "iphone 15", "September": "september"}}'
-    mock_extract_2 = '[{"subject": "iphone 15", "relation": "announced in", "object": "september"}]'
-    
+
+    mock_entity_full = (
+        '{"entities": {"Apple": "apple", "iPhone 15": "iphone 15", '
+        '"It": "iphone 15", "September": "september"}}'
+    )
+    mock_extract = """
+    [
+      {"type": "relation", "subject": "apple", "relation": "released", "object": "iphone 15", "negated": false, "confidence": 1.0},
+      {"type": "relation", "subject": "iphone 15", "relation": "announced in", "object": "september", "negated": false, "confidence": 1.0}
+    ]
+    """
+
     graph = ProRAGGraph()
-    with patch("prorag.extractor.call_llm", side_effect=[
-        mock_entity_1, mock_extract_1, 
-        mock_entity_2_try0, mock_entity_2_try1, mock_extract_2
-    ]) as mock_call:
+    with patch("prorag.extractor.call_llm", side_effect=[mock_entity_full, mock_extract]) as mock_call:
         count, registry = ingest_text(text, graph)
-        
+
+    assert count == 2
     assert "iphone 15" in graph.g.nodes
     assert "september" in graph.g.nodes
-    
-    # Verify call arguments to make sure context was included
-    called_args = [call[0][0] for call in mock_call.call_args_list]
-    assert "Previous context" in called_args[3]
-    assert "S8." in called_args[3]
+    assert mock_call.call_count == 2
+    entity_prompt = mock_call.call_args_list[0][0][0]
+    assert "It was announced in September." in entity_prompt
+    assert "Apple released iPhone 15." in entity_prompt
 
 
 def test_extract_triples_drops_unresolved_pronoun_fact():
@@ -458,3 +484,87 @@ def test_format_context_rich_metadata():
     assert "speech_act: assertion" in context
     assert "caused by: event_123" in context
     assert "temporal: PAST" in context
+
+
+def test_format_context_source_text_is_optional():
+    from prorag.pipeline import _format_context
+
+    graph = ProRAGGraph()
+    graph.add_chunk("doc1", "Apple released iPhone 15. It was announced in September.")
+    triples = [
+        {
+            "subject": "apple",
+            "relation": "released",
+            "object": "iphone 15",
+            "negated": False,
+            "condition": "",
+            "confidence": 1.0,
+            "sources": ["doc1"],
+            "temporal_aspect": "PRESENT",
+        }
+    ]
+
+    graph_only, _, _ = _format_context(triples, graph)
+    with_sources, _, _ = _format_context(triples, graph, include_source_text=True)
+
+    assert "Source Snippets" not in graph_only
+    assert "Source Snippets" in with_sources
+    assert "Apple released iPhone 15." in with_sources
+
+
+def test_answer_quality_mode_controls_answer_tokens():
+    from prorag.pipeline import answer
+
+    graph = ProRAGGraph()
+    graph.add_triple("apple", "launched", "iphone 15")
+
+    with patch("prorag.pipeline.call_llm", return_value="iphone 15") as mock_call:
+        result = answer("What did Apple launch?", graph, quality_mode="cheap")
+
+    assert result["answer"] == "iphone 15"
+    assert mock_call.call_args.kwargs["max_tokens"] == 256
+
+
+def test_chunk_text_by_sentences():
+    from prorag.extractor import _chunk_text_by_sentences
+    text = "Sentence one. Sentence two. Sentence three. Sentence four."
+    # Chunk size is small enough to trigger chunking
+    # "Sentence one." is 13 chars. "Sentence two." is 13 chars.
+    chunks = _chunk_text_by_sentences(text, chunk_size=20, overlap_sentences=1)
+    assert len(chunks) == 4
+    assert chunks[0] == "Sentence one."
+    assert chunks[1] == "Sentence one. Sentence two."
+    assert chunks[2] == "Sentence two. Sentence three."
+    assert chunks[3] == "Sentence three. Sentence four."
+
+
+def test_ingest_file_chunk_overlap():
+    from prorag.extractor import ingest_file
+    from unittest.mock import mock_open
+
+    mock_content = "Sentence one. Sentence two. Sentence three."
+    mock_entity_1 = '{"entities": {"Sentence one": "sentence one"}}'
+    mock_entity_2_unresolved = '{"entities": {"Sentence two": null}}'
+    mock_entity_2_resolved = '{"entities": {"Sentence two": "sentence two"}}'
+    mock_entity_3 = '{"entities": {"Sentence three": "sentence three"}}'
+    mock_extract = '[]'
+
+    graph = ProRAGGraph()
+    with patch("builtins.open", mock_open(read_data=mock_content)), \
+         patch("prorag.extractor.call_llm", side_effect=[
+             mock_entity_1, mock_extract,
+             mock_entity_2_unresolved, mock_entity_2_resolved, mock_extract,
+             mock_entity_3, mock_extract,
+         ]) as mock_call:
+        # chunk_size=15 causes each sentence to be processed separately because "Sentence one. Sentence two." would be 27 chars.
+        ingest_file("dummy_large.txt", graph, chunk_size=15, overlap_sentences=0)
+
+    assert mock_call.call_count == 7
+    retry_prompt = mock_call.call_args_list[3][0][0]
+    assert "Previous context" in retry_prompt
+    assert "Sentence one." in retry_prompt
+    assert set(graph.chunks) == {
+        "dummy_large.txt#chunk-1",
+        "dummy_large.txt#chunk-2",
+        "dummy_large.txt#chunk-3",
+    }

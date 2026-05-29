@@ -9,9 +9,10 @@ import os
 import json
 import time
 import hashlib
+import re
 from datetime import datetime
 from prorag import ProRAG
-from prorag.pipeline import answer, _keywords_from_question
+from prorag.pipeline import _keywords_from_question
 from prorag.llm import call_llm
 
 # ── Extractor Cache ───────────────────────────────────────────────────────────
@@ -249,8 +250,6 @@ QUESTIONS = [
     }
 ]
 
-
-import re
 
 def calculate_f1(pred: str, gold: str) -> float:
     # Strip <think>...</think> tags and contents from prediction

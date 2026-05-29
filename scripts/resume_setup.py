@@ -14,14 +14,6 @@ def resume_benchmark_run(results_path):
     completed_ids = {item["id"] for item in details if item["prorag"]["answer"] != "ERROR" and item["prorag"]["answer"] != "SKIPPED"}
     print(f"Loaded {len(completed_ids)} completed items from {results_path}.")
 
-    # Load dataset
-    dataset_path = "data/hotpot_dev_distractor_v1.json"
-    with open(dataset_path, "r", encoding="utf-8") as f:
-        raw_dataset = json.load(f)
-
-    limit = 25
-    eval_set = raw_dataset[:limit]
-
     # Create a backup file of the input run
     backup_path = results_path + ".bak"
     with open(backup_path, "w", encoding="utf-8") as f:

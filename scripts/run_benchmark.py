@@ -86,13 +86,13 @@ def intercepted_call_llm(prompt, model="llama-3.3-70b-versatile", max_tokens=102
 # Monkey patch the LLM caller globally across all modules
 prorag.llm.call_llm = intercepted_call_llm
 
-import prorag.extractor
+import prorag.extractor  # noqa: E402
 prorag.extractor.call_llm = intercepted_call_llm
 
-import prorag.detector
+import prorag.detector  # noqa: E402
 prorag.detector.call_llm = intercepted_call_llm
 
-import prorag.pipeline
+import prorag.pipeline  # noqa: E402
 prorag.pipeline.call_llm = intercepted_call_llm
 
 
@@ -127,20 +127,20 @@ def save_triple_cache():
         print(f"Failed to save triple cache: {e}")
 
 
-# Hook into ProRAG's triple extraction to check/update cache
-original_extract_triples = None
+# Hook into ProRAG's fact extraction to check/update cache
+original_extract_facts = None
 try:
     import prorag.extractor
-    original_extract_triples = prorag.extractor.extract_triples
+    original_extract_facts = prorag.extractor.extract_facts
 except ImportError:
     pass
 
 
 CACHE_LOCK = threading.Lock()
 
-def cached_extract_triples(text, entity_map=None, source="", llm_model="llama-3.3-70b-versatile"):
+def cached_extract_facts(text, entity_map=None, source="", llm_model="llama-3.3-70b-versatile"):
     if MOCK_MODE:
-        return original_extract_triples(text, entity_map=entity_map, source=source, llm_model=llm_model)
+        return original_extract_facts(text, entity_map=entity_map, source=source, llm_model=llm_model)
 
     text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
     
@@ -148,37 +148,37 @@ def cached_extract_triples(text, entity_map=None, source="", llm_model="llama-3.
     with CACHE_LOCK:
         has_cache = text_hash in TRIPLE_CACHE
         if has_cache:
-            triples = json.loads(json.dumps(TRIPLE_CACHE[text_hash]))
+            facts = json.loads(json.dumps(TRIPLE_CACHE[text_hash]))
         else:
-            triples = None
+            facts = None
 
-    if triples is not None:
+    if facts is not None:
         if source:
-            for t in triples:
-                t["source"] = source
-        return triples
+            for f in facts:
+                f["source"] = source
+        return facts
 
     # Otherwise call the original extractor LLM and cache the result
-    triples = original_extract_triples(text, entity_map=entity_map, source=source, llm_model=llm_model)
+    facts = original_extract_facts(text, entity_map=entity_map, source=source, llm_model=llm_model)
 
     # Store in cache (clean version without runtime source side-effects)
-    raw_triples = []
-    for t in triples:
-        t_clean = t.copy()
-        if "source" in t_clean:
-            del t_clean["source"]
-        raw_triples.append(t_clean)
+    raw_facts = []
+    for f in facts:
+        f_clean = f.copy()
+        if "source" in f_clean:
+            del f_clean["source"]
+        raw_facts.append(f_clean)
 
     with CACHE_LOCK:
-        TRIPLE_CACHE[text_hash] = raw_triples
+        TRIPLE_CACHE[text_hash] = raw_facts
         save_triple_cache()
 
-    return triples
+    return facts
 
 
 # Apply the extractor cache patch
-if original_extract_triples:
-    prorag.extractor.extract_triples = cached_extract_triples
+if original_extract_facts:
+    prorag.extractor.extract_facts = cached_extract_facts
 
 
 # ── Naive RAG Implementation ──────────────────────────────────────────────────
@@ -290,8 +290,13 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate ProRAG vs Naive RAG on HotpotQA")
     parser.add_argument("--dataset", type=str, default="data/hotpot_dev_distractor_v1.json", help="Path to HotpotQA dataset")
     parser.add_argument("--n", type=int, default=5, help="Number of questions to evaluate")
-    parser.add_argument("--model", type=str, default="llama-3.3-70b-versatile", help="LLM Model to use")
-    parser.add_argument("--extractor-model", type=str, default="llama-3.3-70b-versatile", help="LLM Model to use for ProRAG ingestion/triple extraction")
+    parser.add_argument("--model", type=str, default="google/gemma-4-26b-a4b-it:free", help="LLM Model to use")
+    parser.add_argument(
+        "--extractor-model",
+        type=str,
+        default="google/gemma-4-26b-a4b-it:free",
+        help="LLM Model to use for ProRAG ingestion/triple extraction",
+    )
     parser.add_argument("--mock", action="store_true", help="Run in offline mock mode without API keys")
     parser.add_argument("--resume", type=str, default="", help="Path to partially finished benchmark JSON file to resume from")
     args = parser.parse_args()
@@ -372,26 +377,51 @@ def main():
             title, sentences = title_and_sentences
             paragraph = " ".join(sentences)
             import prorag.extractor
-            triples = prorag.extractor.extract_triples(paragraph, source=title, llm_model=args.extractor_model)
-            return title, triples
+            print(f"    [ingest] extracting: {title[:60]}...", flush=True)
+            facts = prorag.extractor.extract_facts(paragraph, source=title, llm_model=args.extractor_model)
+            print(f"    [ingest] {title[:40]}: {len(facts)} facts", flush=True)
+            return title, facts, paragraph
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             extracted_results = list(executor.map(extract_para, context_data))
             
-        for title, triples in extracted_results:
-            for t in triples:
+        for title, facts, paragraph in extracted_results:
+            prorag_instance.graph.add_chunk(title, paragraph)
+            for f in facts:
                 try:
-                    prorag_instance.graph.add_triple(
-                        subject=t["subject"],
-                        relation=t["relation"],
-                        obj=t["object"],
-                        source=t.get("source", title),
-                        condition=t.get("condition", ""),
-                        negated=t.get("negated", False),
-                        confidence=float(t.get("confidence", 1.0)),
-                        statement_time=t.get("statement_time", ""),
-                        temporal_aspect=t.get("temporal_aspect", "PRESENT"),
-                    )
+                    fact_type = f.get("type", "relation")
+                    if fact_type == "relation":
+                        prorag_instance.graph.add_triple(
+                            subject=f["subject"],
+                            relation=f["relation"],
+                            obj=f["object"],
+                            source=f.get("source", title),
+                            condition=f.get("condition", ""),
+                            negated=f.get("negated", False),
+                            confidence=float(f.get("confidence", 1.0)),
+                            statement_time=f.get("statement_time", ""),
+                            temporal_aspect=f.get("temporal_aspect", "PRESENT"),
+                        )
+                    elif fact_type == "attribute":
+                        prorag_instance.graph.add_attribute(
+                            subject=f["subject"],
+                            key=f["key"],
+                            value=f["value"],
+                            source=f.get("source", title),
+                            confidence=float(f.get("confidence", 1.0)),
+                        )
+                    elif fact_type == "event":
+                        prorag_instance.graph.add_event(
+                            event_id=f["event_id"],
+                            role=f["role"],
+                            entity=f["entity"],
+                            source=f.get("source", title),
+                            condition=f.get("condition", ""),
+                            negated=f.get("negated", False),
+                            confidence=float(f.get("confidence", 1.0)),
+                            statement_time=f.get("statement_time", ""),
+                            temporal_aspect=f.get("temporal_aspect", "PRESENT"),
+                        )
                 except (KeyError, TypeError):
                     continue
         
@@ -455,6 +485,16 @@ def main():
                 "graph_stats": prorag_instance.stats()
             }
         })
+
+        # Save intermediate results to prevent data loss on crashes
+        if not os.path.exists("results"):
+            os.makedirs("results")
+        temp_path = "results/benchmark_temp.json"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump({"summary": summary, "details": results}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"    Failed to save intermediate results: {e}")
 
     # Calculate summary
     for r in results:

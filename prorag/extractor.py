@@ -10,9 +10,12 @@ import re
 from .entity_utils import normalize_entity_name
 from .graph import ProRAGGraph
 from .llm import call_llm
+from .modes import QualityMode, get_mode_config
 
 _ENTITY_RESOLUTION_PROMPT = """\
 You are an entity resolution assistant.
+
+The full document (or passage) is provided below. Use the entire context—models can attend across all sentences—to resolve pronouns and vague references (he, she, it, the company, etc.) to their canonical entities.
 
 Find ALL noun phrases, pronouns, references, and descriptive details (such as clothing items, physical characteristics, specific events, and objects) in the text.
 Map each mention to its canonical entity name.
@@ -135,6 +138,7 @@ def resolve_entities(
     history_sentences: list[str] | set[str] | None = None,
     known_entities: list[str] | set[str] | None = None,
     llm_model: str = "llama-3.3-70b-versatile",
+    quality_mode: QualityMode | str = "balanced",
 ) -> dict[str, str | None]:
     """Find all mentions in text and map each to a canonical entity name.
 
@@ -142,6 +146,7 @@ def resolve_entities(
     Otherwise, lazy context expansion is applied on mention resolution failure (resolves to null/None).
     """
     is_old_registry = isinstance(history_sentences, set)
+    mode_config = get_mode_config(quality_mode)
 
     if is_old_registry:
         known_str = json.dumps(sorted(history_sentences), ensure_ascii=False)
@@ -149,15 +154,25 @@ def resolve_entities(
             known_entities=known_str,
             text=text.strip(),
         )
-        raw = call_llm(prompt, model=llm_model, max_tokens=1024)
+        raw = call_llm(prompt, model=llm_model, max_tokens=mode_config.entity_max_tokens)
         return _parse_entity_map(raw)
 
     history_list = list(history_sentences) if history_sentences else []
     known_list = sorted(list(known_entities)) if known_entities else []
     known_str = json.dumps(known_list, ensure_ascii=False)
-    max_retries = 2
-    expand_sentences = 4
 
+    # Full passage in one call (preferred). Lazy history expansion only when a caller
+    # passes prior sentences (legacy incremental ingest paths).
+    if not history_list:
+        prompt = _ENTITY_RESOLUTION_PROMPT.format(
+            known_entities=known_str,
+            text=text.strip(),
+        )
+        raw = call_llm(prompt, model=llm_model, max_tokens=mode_config.entity_max_tokens)
+        return _parse_entity_map(raw)
+
+    max_retries = mode_config.entity_max_retries
+    expand_sentences = mode_config.entity_expand_sentences
     for retry in range(max_retries + 1):
         if retry == 0:
             text_input = text.strip()
@@ -174,11 +189,11 @@ def resolve_entities(
             known_entities=known_str,
             text=text_input,
         )
-        raw = call_llm(prompt, model=llm_model, max_tokens=1024)
+        raw = call_llm(prompt, model=llm_model, max_tokens=mode_config.entity_max_tokens)
         entity_map = _parse_entity_map(raw)
 
         has_null = any(v is None for v in entity_map.values())
-        if not has_null or not history_list or retry == max_retries:
+        if not has_null or retry == max_retries:
             return entity_map
 
     return {}
@@ -210,14 +225,28 @@ def extract_facts(
     entity_map: dict[str, str | None] | None = None,
     source: str = "",
     llm_model: str = "llama-3.3-70b-versatile",
+    quality_mode: QualityMode | str = "balanced",
 ) -> list[dict]:
     """Extract canonical relations, attributes, and events from text."""
+    mode_config = get_mode_config(quality_mode)
     if entity_map is not None:
         annotated_text = substitute_mentions(text, entity_map)
-        valid_canonical_names = {normalize_entity_name(v) for v in entity_map.values() if v is not None}
+        valid_canonical_names = {
+            normalize_entity_name(name)
+            for name in re.findall(r"\[(.+?)\]", annotated_text)
+        }
+        if not valid_canonical_names:
+            valid_canonical_names = {
+                normalize_entity_name(v) for v in entity_map.values() if v is not None
+            }
         null_mentions = {normalize_entity_name(k) for k, v in entity_map.items() if v is None}
     elif not re.search(r"\[.+?\]", text):
-        entity_map = resolve_entities(text, None, llm_model)
+        entity_map = resolve_entities(
+            text,
+            history_sentences=None,
+            llm_model=llm_model,
+            quality_mode=quality_mode,
+        )
         annotated_text = substitute_mentions(text, entity_map)
         valid_canonical_names = {normalize_entity_name(v) for v in entity_map.values() if v is not None}
         null_mentions = {normalize_entity_name(k) for k, v in entity_map.items() if v is None}
@@ -229,7 +258,7 @@ def extract_facts(
     prompt = _EXTRACT_PROMPT.format(
         text=annotated_text.strip(),
     )
-    raw = call_llm(prompt, model=llm_model, max_tokens=3072)
+    raw = call_llm(prompt, model=llm_model, max_tokens=mode_config.extraction_max_tokens)
     raw_facts = _parse_json_array(raw)
 
     facts = []
@@ -265,10 +294,102 @@ def extract_triples(
     entity_map: dict[str, str | None] | None = None,
     source: str = "",
     llm_model: str = "llama-3.3-70b-versatile",
+    quality_mode: QualityMode | str = "balanced",
 ) -> list[dict]:
     """Extract canonical triples from text using the resolved entities (legacy wrapper)."""
-    facts = extract_facts(text, entity_map, source, llm_model)
+    facts = extract_facts(text, entity_map, source, llm_model, quality_mode)
     return [f for f in facts if f.get("type") == "relation"]
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", text) if s.strip()]
+
+
+def _split_text_for_extraction(text: str, max_chars: int | None) -> list[str]:
+    """Split annotated text into segments only when extraction would exceed max_chars."""
+    if max_chars is None or max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+
+    sentences = _split_sentences(text)
+    if not sentences:
+        return [text]
+
+    segments: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for sentence in sentences:
+        addition = len(sentence) + (1 if current else 0)
+        if current and current_len + addition > max_chars:
+            segments.append(" ".join(current))
+            current = [sentence]
+            current_len = len(sentence)
+        else:
+            current.append(sentence)
+            current_len += addition
+    if current:
+        segments.append(" ".join(current))
+    return segments
+
+
+def _write_facts_to_graph(
+    graph: ProRAGGraph,
+    facts: list[dict],
+    source: str,
+) -> int:
+    added = 0
+    for fact in facts:
+        try:
+            fact_type = fact.get("type")
+            if fact_type == "relation":
+                graph.add_relation(
+                    subject=fact["subject"],
+                    relation=fact["relation"],
+                    obj=fact["object"],
+                    source=fact.get("source", source),
+                    condition=fact.get("condition", ""),
+                    negated=fact.get("negated", False),
+                    confidence=float(fact.get("confidence", 1.0)),
+                    statement_time=fact.get("statement_time", ""),
+                    temporal_aspect=fact.get("temporal_aspect", "PRESENT"),
+                    aspect=fact.get("aspect", ""),
+                    modality=fact.get("modality", ""),
+                    quantifier=fact.get("quantifier", ""),
+                    evidentiality=fact.get("evidentiality", ""),
+                    speech_act=fact.get("speech_act", ""),
+                    causal=fact.get("causal", ""),
+                )
+                added += 1
+            elif fact_type == "attribute":
+                graph.add_attribute(
+                    subject=fact["subject"],
+                    key=fact["key"],
+                    value=fact["value"],
+                    source=fact.get("source", source),
+                    confidence=float(fact.get("confidence", 1.0)),
+                )
+                added += 1
+            elif fact_type == "event":
+                graph.add_event(
+                    event_id=fact["event_id"],
+                    role=fact["role"],
+                    entity=fact["entity"],
+                    source=fact.get("source", source),
+                    condition=fact.get("condition", ""),
+                    negated=fact.get("negated", False),
+                    confidence=float(fact.get("confidence", 1.0)),
+                    statement_time=fact.get("statement_time", ""),
+                    temporal_aspect=fact.get("temporal_aspect", "PRESENT"),
+                    aspect=fact.get("aspect", ""),
+                    modality=fact.get("modality", ""),
+                    quantifier=fact.get("quantifier", ""),
+                    evidentiality=fact.get("evidentiality", ""),
+                    speech_act=fact.get("speech_act", ""),
+                    causal=fact.get("causal", ""),
+                )
+                added += 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    return added
 
 
 def ingest_text(
@@ -277,101 +398,93 @@ def ingest_text(
     entity_registry: set[str] | None = None,
     source: str = "",
     llm_model: str = "llama-3.3-70b-versatile",
+    extract_max_chars: int | None = None,
+    extract_overlap_sentences: int = 0,
+    quality_mode: QualityMode | str = "balanced",
 ) -> tuple[int, set[str]]:
     """Extract canonical triples from text and add them to the graph.
 
-    Reads by sentence batch (size 8) and performs lazy context expansion.
+    Entity resolution runs once on the full input so the LLM can use cross-sentence
+    attention. Fact extraction reuses that entity map; optional ``extract_max_chars``
+    only splits extraction when the annotated passage is very long.
     Returns (triple_count, updated_entity_registry) for backward compatibility.
     """
     if not source:
         import hashlib
         source = f"hash_{hashlib.md5(text.encode('utf-8')).hexdigest()[:12]}"
 
-    if hasattr(graph, "add_chunk"):
-        graph.add_chunk(source, text)
-
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?\n])\s+", text) if s.strip()]
-    if not sentences:
+    if not text.strip():
         return 0, entity_registry or set()
 
     total_triples = 0
     all_resolved_entities = set(entity_registry) if entity_registry is not None else set()
+    all_resolved_entities.update(graph.g.nodes)
 
-    batch_size = 8
-    for i in range(0, len(sentences), batch_size):
-        batch_sentences = sentences[i : i + batch_size]
-        batch_text = " ".join(batch_sentences)
-        history_sentences = sentences[max(0, i - 8) : i]
+    entity_map = resolve_entities(
+        text,
+        known_entities=all_resolved_entities,
+        llm_model=llm_model,
+        quality_mode=quality_mode,
+    )
+    for canonical in entity_map.values():
+        if canonical is not None:
+            all_resolved_entities.add(canonical)
 
-        known_entities = set(graph.g.nodes)
-        entity_map = resolve_entities(
-            batch_text,
-            history_sentences,
-            known_entities=known_entities,
+    if extract_max_chars is None or extract_max_chars <= 0 or len(text) <= extract_max_chars:
+        segments = [text]
+    else:
+        segments = _chunk_text_by_sentences(text, extract_max_chars, extract_overlap_sentences)
+        if not segments:
+            segments = [text]
+
+    multi_segment = len(segments) > 1
+    for idx, segment in enumerate(segments, start=1):
+        segment_source = f"{source}#chunk-{idx}" if multi_segment else source
+        if hasattr(graph, "add_chunk"):
+            graph.add_chunk(segment_source, segment)
+        facts = extract_facts(
+            segment,
+            entity_map=entity_map,
+            source=segment_source,
             llm_model=llm_model,
+            quality_mode=quality_mode,
         )
-
-        for canonical in entity_map.values():
-            if canonical is not None:
-                all_resolved_entities.add(canonical)
-
-        annotated_text = substitute_mentions(batch_text, entity_map)
-        facts = extract_facts(annotated_text, source=source, llm_model=llm_model)
-
-        for fact in facts:
-            try:
-                fact_type = fact.get("type")
-                if fact_type == "relation":
-                    graph.add_relation(
-                        subject=fact["subject"],
-                        relation=fact["relation"],
-                        obj=fact["object"],
-                        source=fact.get("source", source),
-                        condition=fact.get("condition", ""),
-                        negated=fact.get("negated", False),
-                        confidence=float(fact.get("confidence", 1.0)),
-                        statement_time=fact.get("statement_time", ""),
-                        temporal_aspect=fact.get("temporal_aspect", "PRESENT"),
-                        aspect=fact.get("aspect", ""),
-                        modality=fact.get("modality", ""),
-                        quantifier=fact.get("quantifier", ""),
-                        evidentiality=fact.get("evidentiality", ""),
-                        speech_act=fact.get("speech_act", ""),
-                        causal=fact.get("causal", ""),
-                    )
-                    total_triples += 1
-                elif fact_type == "attribute":
-                    graph.add_attribute(
-                        subject=fact["subject"],
-                        key=fact["key"],
-                        value=fact["value"],
-                        source=fact.get("source", source),
-                        confidence=float(fact.get("confidence", 1.0)),
-                    )
-                    total_triples += 1
-                elif fact_type == "event":
-                    graph.add_event(
-                        event_id=fact["event_id"],
-                        role=fact["role"],
-                        entity=fact["entity"],
-                        source=fact.get("source", source),
-                        condition=fact.get("condition", ""),
-                        negated=fact.get("negated", False),
-                        confidence=float(fact.get("confidence", 1.0)),
-                        statement_time=fact.get("statement_time", ""),
-                        temporal_aspect=fact.get("temporal_aspect", "PRESENT"),
-                        aspect=fact.get("aspect", ""),
-                        modality=fact.get("modality", ""),
-                        quantifier=fact.get("quantifier", ""),
-                        evidentiality=fact.get("evidentiality", ""),
-                        speech_act=fact.get("speech_act", ""),
-                        causal=fact.get("causal", ""),
-                    )
-                    total_triples += 1
-            except (KeyError, TypeError, ValueError):
-                continue
+        total_triples += _write_facts_to_graph(graph, facts, segment_source)
 
     return total_triples, all_resolved_entities
+
+
+def _chunk_text_by_sentences(text: str, chunk_size: int, overlap_sentences: int) -> list[str]:
+    """Split text into sentence-based chunks of maximum character size chunk_size with sentence-based overlap."""
+    sentences = _split_sentences(text)
+    if not sentences:
+        return []
+
+    chunks = []
+    current_chunk: list[str] = []
+    current_len = 0
+
+    for sentence in sentences:
+        sentence_len = len(sentence)
+        if current_chunk and current_len + sentence_len > chunk_size:
+            chunks.append(" ".join(current_chunk))
+            if overlap_sentences > 0 and len(current_chunk) >= overlap_sentences:
+                current_chunk = current_chunk[-overlap_sentences:]
+                current_len = sum(len(s) for s in current_chunk) + len(current_chunk) - 1
+            else:
+                current_chunk = []
+                current_len = 0
+
+        current_chunk.append(sentence)
+        if current_len > 0:
+            current_len += 1 + sentence_len
+        else:
+            current_len = sentence_len
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return chunks
 
 
 def ingest_file(
@@ -381,20 +494,59 @@ def ingest_file(
     llm_model: str = "llama-3.3-70b-versatile",
     chunk_size: int = 1500,
     overlap_sentences: int = 1,
+    quality_mode: QualityMode | str = "balanced",
 ) -> int:
-    """Read a plain-text file and ingest all content directly."""
+    """Read a plain-text file and ingest it with lazy chunk-level entity resolution."""
     with open(path, encoding="utf-8") as handle:
         content = handle.read()
 
     chunk_source_id = source or path
-    count, _ = ingest_text(
-        content,
-        graph,
-        entity_registry=None,
-        source=chunk_source_id,
-        llm_model=llm_model,
-    )
-    return count
+    if len(content) <= chunk_size:
+        count, _ = ingest_text(
+            content,
+            graph,
+            entity_registry=set(graph.g.nodes),
+            source=chunk_source_id,
+            llm_model=llm_model,
+            quality_mode=quality_mode,
+        )
+        return count
+
+    chunks = _chunk_text_by_sentences(content, chunk_size, overlap_sentences)
+    if not chunks:
+        return 0
+
+    total_triples = 0
+    entity_registry = set(graph.g.nodes)
+    history_sentences: list[str] = []
+
+    for idx, chunk in enumerate(chunks, start=1):
+        chunk_source = f"{chunk_source_id}#chunk-{idx}"
+        if hasattr(graph, "add_chunk"):
+            graph.add_chunk(chunk_source, chunk)
+
+        entity_map = resolve_entities(
+            chunk,
+            history_sentences=history_sentences,
+            known_entities=entity_registry,
+            llm_model=llm_model,
+            quality_mode=quality_mode,
+        )
+        for canonical in entity_map.values():
+            if canonical is not None:
+                entity_registry.add(canonical)
+
+        facts = extract_facts(
+            chunk,
+            entity_map=entity_map,
+            source=chunk_source,
+            llm_model=llm_model,
+            quality_mode=quality_mode,
+        )
+        total_triples += _write_facts_to_graph(graph, facts, chunk_source)
+        history_sentences.extend(_split_sentences(chunk))
+
+    return total_triples
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

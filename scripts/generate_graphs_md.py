@@ -1,11 +1,12 @@
 import json
 import os
 import hashlib
+import re
 
 def main():
     dataset_path = "data/hotpot_dev_distractor_v1.json"
     cache_path = "data/extracted_triples_cache.json"
-    output_path = r"C:\Users\hanng\.gemini\antigravity\brain\3b0f8025-d1a6-40b0-9a79-2c83c03fa0bf\question_graphs.md"
+    output_path = r"C:\Users\hanng\.gemini\antigravity\brain\c7c02d44-7ee7-4dee-9885-86e8a6eb8250\question_graphs.md"
 
     if not os.path.exists(dataset_path):
         print(f"Error: Dataset {dataset_path} not found.")
@@ -65,6 +66,68 @@ def main():
                 condstr = f"`{t['condition']}`" if t.get("condition") else "-"
                 md_content.append(f"| **{t['subject']}** | {negstr}{t['relation'].upper()} | {t['object']} | {condstr} | *{t['source']}* |")
             md_content.append("")
+
+            # Generate Mermaid Graph
+            question_words = set(re.findall(r"\b\w{3,}\b", question.lower()))
+            gold_words = set(re.findall(r"\b\w{3,}\b", gold_answer.lower()))
+
+            def get_relevance(t):
+                score = 0
+                subj_lower = t["subject"].lower()
+                obj_lower = t["object"].lower()
+                rel_lower = t["relation"].lower()
+                for w in question_words:
+                    if w in subj_lower:
+                        score += 2
+                    if w in obj_lower:
+                        score += 2
+                    if w in rel_lower:
+                        score += 1
+                for w in gold_words:
+                    if w in subj_lower:
+                        score += 3
+                    if w in obj_lower:
+                        score += 3
+                return score
+
+            mermaid_triples = sorted(all_triples, key=lambda x: (-get_relevance(x), x["subject"].lower()))[:15]
+
+            md_content.append("### Sơ đồ Trực quan (Mermaid Graph):")
+            md_content.append("```mermaid")
+            md_content.append("graph TD")
+
+            added_edges = set()
+            node_ids = {}
+            node_counter = 0
+
+            def get_node_id(name):
+                nonlocal node_counter
+                norm = name.lower().strip()
+                if norm not in node_ids:
+                    node_ids[norm] = f"n{node_counter}"
+                    node_counter += 1
+                return node_ids[norm]
+
+            for t in mermaid_triples:
+                subj = t["subject"].strip()
+                obj = t["object"].strip()
+                rel = t["relation"].strip().upper()
+                if t.get("negated"):
+                    rel = "NOT " + rel
+
+                subj_clean = subj.replace('"', '\\"').replace('(', '[').replace(')', ']')
+                obj_clean = obj.replace('"', '\\"').replace('(', '[').replace(')', ']')
+                rel_clean = rel.replace('"', '\\"').replace('(', '[').replace(')', ']')
+
+                sid = get_node_id(subj)
+                oid = get_node_id(obj)
+
+                edge_key = (sid, oid, rel_clean)
+                if edge_key not in added_edges:
+                    added_edges.add(edge_key)
+                    md_content.append(f'  {sid}["{subj_clean}"] -->|"{rel_clean}"| {oid}["{obj_clean}"]')
+
+            md_content.append("```\n")
         
         md_content.append("---\n")
 

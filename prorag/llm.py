@@ -5,8 +5,16 @@ Default: Groq (fast, free tier available).
 Swap to OpenAI, Anthropic, or local Ollama by setting PRORAG_LLM_PROVIDER.
 """
 
+import hashlib
+import json
 import os
+import tempfile
+import threading
+from pathlib import Path
 from typing import Any
+
+_CACHE_LOCK = threading.Lock()
+_CACHE_SENTINEL = object()
 
 
 def call_llm(
@@ -17,17 +25,85 @@ def call_llm(
 ) -> str:
     """Single synchronous LLM call. Returns the assistant text."""
     provider = os.getenv("PRORAG_LLM_PROVIDER", "groq").lower()
+    cache_key = _cache_key(provider, model, max_tokens, system, prompt)
+    cached = _cache_get(cache_key)
+    if cached is not _CACHE_SENTINEL:
+        return str(cached)
 
     if provider == "groq":
-        return _groq(prompt, model=model, max_tokens=max_tokens, system=system)
+        response = _groq(prompt, model=model, max_tokens=max_tokens, system=system)
     elif provider == "openai":
-        return _openai(prompt, model=model, max_tokens=max_tokens, system=system)
+        response = _openai(prompt, model=model, max_tokens=max_tokens, system=system)
     elif provider == "ollama":
-        return _ollama(prompt, model=model, max_tokens=max_tokens)
+        response = _ollama(prompt, model=model, max_tokens=max_tokens)
     elif provider == "anthropic":
-        return _anthropic(prompt, model=model, max_tokens=max_tokens, system=system)
+        response = _anthropic(prompt, model=model, max_tokens=max_tokens, system=system)
     else:
         raise ValueError(f"Unknown PRORAG_LLM_PROVIDER: {provider!r}")
+
+    _cache_set(cache_key, response)
+    return response
+
+
+def _cache_enabled() -> bool:
+    return os.getenv("PRORAG_LLM_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cache_path() -> Path:
+    return Path(os.getenv("PRORAG_LLM_CACHE_PATH", ".prorag_cache/llm_cache.json"))
+
+
+def _cache_key(provider: str, model: str, max_tokens: int, system: str, prompt: str) -> str:
+    payload = json.dumps(
+        {
+            "provider": provider,
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "prompt": prompt,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key: str) -> str | object:
+    if not _cache_enabled():
+        return _CACHE_SENTINEL
+    path = _cache_path()
+    if not path.exists():
+        return _CACHE_SENTINEL
+    with _CACHE_LOCK:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                cache = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return _CACHE_SENTINEL
+    return cache.get(key, _CACHE_SENTINEL)
+
+
+def _cache_set(key: str, value: str) -> None:
+    if not _cache_enabled():
+        return
+    path = _cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _CACHE_LOCK:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                cache = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            cache = {}
+        cache[key] = value
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            json.dump(cache, handle, ensure_ascii=False)
+            temp_path = Path(handle.name)
+        temp_path.replace(path)
 
 
 # ── providers ─────────────────────────────────────────────────────────────────
@@ -72,15 +148,40 @@ def _openai(prompt, model, max_tokens, system) -> str:
         from openai import OpenAI
     except ImportError:
         raise ImportError("pip install openai")
+    import time
 
     api_key = os.environ.get("OPENAI_API_KEY") or _missing("OPENAI_API_KEY")
-    client = OpenAI(api_key=api_key)
+    base_url = os.getenv("OPENAI_BASE_URL")
+    client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    resp = client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
-    return resp.choices[0].message.content or ""
+
+    max_retries = 8
+    for attempt in range(max_retries):
+        try:
+            resp = client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            err_str = str(e).lower()
+            is_rate_limit = any(
+                term in err_str
+                for term in ("429", "rate limit", "rate_limit", "too many requests")
+            )
+            is_conn_error = any(
+                term in err_str
+                for term in ("connection error", "connecterror", "timeout", "unreachable")
+            )
+            if is_rate_limit or is_conn_error:
+                wait_time = (2 ** attempt) * 2
+                error_type = "Rate Limit" if is_rate_limit else "Connection Error"
+                print(f"[{error_type}] OpenAI-compatible call failed. Waiting {wait_time}s... ({e})")
+                time.sleep(wait_time)
+            else:
+                raise
+
+    raise RuntimeError("Failed OpenAI-compatible API call after maximum retries.")
 
 
 def _ollama(prompt, model, max_tokens) -> str:

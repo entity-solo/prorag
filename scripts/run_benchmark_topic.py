@@ -82,13 +82,13 @@ def intercepted_call_llm(prompt, model="llama-3.3-70b-versatile", max_tokens=102
 # Apply monkey patches globally
 prorag.llm.call_llm = intercepted_call_llm
 
-import prorag.extractor
+import prorag.extractor  # noqa: E402
 prorag.extractor.call_llm = intercepted_call_llm
 
-import prorag.detector
+import prorag.detector  # noqa: E402
 prorag.detector.call_llm = intercepted_call_llm
 
-import prorag.pipeline
+import prorag.pipeline  # noqa: E402
 prorag.pipeline.call_llm = intercepted_call_llm
 
 
