@@ -6,6 +6,7 @@ dist/
 build/
 .env
 .env.*
+!.env.example
 .venv/
 venv/
 .pytest_cache/
@@ -20,6 +21,7 @@ htmlcov/
 
 # Generated / temporary files
 scratch/
+models/
 data/graphs/
 data/*.db
 data/*.bak

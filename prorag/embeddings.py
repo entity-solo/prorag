@@ -8,12 +8,14 @@ Used in ProRAG's 2-phase vector retrieval:
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 
 class EmbeddingStore:
     """
-    Singleton embedding store backed by a local sentence-transformers model.
+    Singleton embedding store backed by an optional sentence-transformers model.
 
     The model is loaded lazily on first use. All embeddings are L2-normalized
     so cosine similarity reduces to a simple dot product.
@@ -21,10 +23,13 @@ class EmbeddingStore:
 
     _instance: "EmbeddingStore | None" = None
 
-    def __new__(cls, model_name: str = "all-MiniLM-L6-v2") -> "EmbeddingStore":
+    def __new__(cls, model_name: str | None = None) -> "EmbeddingStore":
         if cls._instance is None:
             inst = super().__new__(cls)
-            inst._model_name = model_name
+            inst._model_name = model_name or os.getenv(
+                "PRORAG_EMBEDDING_MODEL",
+                "sentence-transformers/all-MiniLM-L6-v2",
+            )
             inst._model = None
             inst._use_fallback = False
             inst._cache: dict[str, np.ndarray] = {}
@@ -44,13 +49,8 @@ class EmbeddingStore:
             self._use_fallback = True
             return
 
-        import os
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        local_path = os.path.join(repo_root, "models", self._model_name)
-        load_path = local_path if os.path.exists(local_path) else self._model_name
-
         try:
-            self._model = SentenceTransformer(load_path)
+            self._model = SentenceTransformer(self._model_name)
         except Exception:
             self._use_fallback = True
 

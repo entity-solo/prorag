@@ -29,20 +29,43 @@ graph TD
 ## Install
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
+```
+
+For development:
+
+```bash
+pip install -e ".[dev]"
 ```
 
 Set a provider key before using the default Groq backend:
 
 ```bash
+cp .env.example .env
 export GROQ_API_KEY=your_key_here
 ```
 
 On Windows PowerShell:
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+Copy-Item .env.example .env
 $env:GROQ_API_KEY = "your_key_here"
 ```
+
+ProRAG does not ship a local embedding model. Set `PRORAG_EMBEDDING_MODEL` to a
+SentenceTransformers model name or local path if you want semantic embeddings:
+
+```bash
+export PRORAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+```
+
+If the model is unavailable, ProRAG falls back to deterministic hash embeddings
+so local tests and keyword-oriented retrieval still work.
 
 ## Quickstart
 
